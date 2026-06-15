@@ -1,21 +1,8 @@
-# Environments
-.env
-.venv
-env/
-venv/
-ENV/
-env.bak/
-venv.bak/
-
-# Byte-compiled / optimized / DLL files
+# Python standard ignores
 __pycache__/
 *.py[cod]
 *$py.class
-
-# C extensions
 *.so
-
-# Distribution / packaging
 .Python
 build/
 develop-eggs/
@@ -35,43 +22,42 @@ share/python-wheels/
 *.egg
 MANIFEST
 
-# Installer logs
-pip-log.txt
-pip-delete-this-directory.txt
+# Environments & Secrets
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
 
-# Unit test / coverage reports
-htmlcov/
-.tox/
-.nox/
-.coverage
-.coverage.*
-.cache
-nosetests.xml
-coverage.xml
-*.cover
-*.py,cover
-.hypothesis/
-.pytest_cache/
-cover/
-
-# Logs and temporary files
-logs/
+# Logs and Caches
 *.log
 antigravity.log
-tmp/
-temp/
+saksham.log
+logs/
+.cache
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
 
-# Application specific
+# Application Specific / User Data
+exports/
 drawings/
 whiteboard_*.png
 
-# Generated artifacts
+# LLM Agent / System Generated
 .gemini/
 brain/
 artifacts/
 .system_generated/
 
-# OS generated files
+# OS-specific
 .DS_Store
 .DS_Store?
 ._*
@@ -79,3 +65,12 @@ artifacts/
 .Trashes
 ehthumbs.db
 Thumbs.db
+
+# VS Code & IDEs
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?

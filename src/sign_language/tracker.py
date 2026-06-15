@@ -3,7 +3,7 @@ import mediapipe as mp
 import numpy as np
 import logging
 from typing import Dict, List, Tuple, Optional
-import src.config as config
+import src.config.settings as config
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 

@@ -1,40 +1,46 @@
-# AntiGravity
+# SAKSHAM-V1
 
-AntiGravity is a futuristic, touchless computer control interface powered by hand tracking via a webcam.
+SAKSHAM (Smart AI Knowledge Assistant for Sign, Hearing, and Accessible Multimodal Communication) is an AI-powered accessibility platform designed to bridge communication gaps between deaf, hard-of-hearing, and hearing individuals through speech recognition, sign language integration, and real-time communication assistance.
 
 ## Features
 
-- **Virtual Mouse Navigation:** Control your computer cursor with hand gestures. Pinch to click, double-click, and drag.
-- **Gesture Control:** Uses a robust MediaPipe hand tracking pipeline to recognize gestures like OPEN_PALM, CLOSED_FIST, PINCH, POINT, THUMBS_UP, PEACE_SIGN, etc.
-- **Cyberpunk HUD:** An overlay interface displaying tracking confidence, active gestures, and system metrics.
-- **Virtual Whiteboard (Phase 3):** A gesture-controlled drawing canvas. Hold THUMBS_UP to enter whiteboard mode, draw with PINCH, and select tools (colors, brush sizes, eraser) using a hover-based side toolbar.
-
-## Architecture
-
-- **`main.py`**: The application loop and state machine.
-- **`camera.py`**: Multi-threaded webcam capture.
-- **`hand_tracker.py`**: MediaPipe integration for hand landmarks and finger state detection.
-- **`gesture_engine.py`**: Real-time gesture recognition with temporal smoothing.
-- **`virtual_mouse.py`**: Translates hand coordinates and gestures to Win32 mouse events.
-- **`ui.py`**: OpenCV-based rendering for the HUD, hover buttons, and debug dashboard.
-- **`whiteboard.py`**: Manages the drawing canvas, stroke smoothing, sub-pixel interpolation, and the hover toolbar.
+- **Accessibility-Focused UI:** Responsive chat bubble layout displaying conversation history with precise timestamps.
+- **Microphone Integration:** Real-time state indicators (Listening, Processing, Idle) and a dedicated Live Transcript panel for speech-to-text.
+- **Webcam Preview:** Clean camera preview for real-time video feedback.
+- **Session Management:** Tracks message counts, session duration, and export history. Includes hotkeys to clear session or start a new one.
+- **Conversation Export:** Robust export options (TXT and JSON) to the `exports/` folder with file verification.
+- **Developer Mode:** Toggle dev overlays (FPS and tracking landmarks) using the `D` key.
+- **Future Ready:** Modular design ready for Silero VAD + Faster-Whisper migration.
 
 ## Requirements
 
 - Python 3.9+
-- Windows OS (for `win32api` virtual mouse)
+- Windows OS (recommended for UI and audio APIs)
 - Webcam
+- Microphone
 
 ## Installation
 
-```bash
-python -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
-```
+1. Set up a virtual environment:
+   ```bash
+   python -m venv .venv
+   .venv\Scripts\activate
+   ```
+2. Install dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
 
 ## Usage
 
+Start the main application loop:
 ```bash
-python -m src.main
+python src/main.py
 ```
+
+### Shortcuts
+- `C` - Clear conversation
+- `E` - Export conversation (exports both TXT and JSON to `exports/`)
+- `O` - Open exports directory in File Explorer
+- `D` - Toggle Developer Mode (FPS & Landmarks)
+- `Q` / `ESC` - Quit application

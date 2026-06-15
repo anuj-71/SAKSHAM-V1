@@ -50,6 +50,7 @@ logs/
 exports/
 drawings/
 whiteboard_*.png
+tests/*.png
 
 # LLM Agent / System Generated
 .gemini/

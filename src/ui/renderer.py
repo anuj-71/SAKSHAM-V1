@@ -348,7 +348,20 @@ class UIRenderer:
         else:
             draw.text((24, self.input_y + 14), display_text, font=self.font_body, fill=(255, 255, 255))
             
-        # Draw Send button text
+        # Draw Listen and Send buttons
+        # Listen button (left of Send)
+        listen_w = 80
+        listen_x1 = self.width - 100 - listen_w
+        listen_x2 = listen_x1 + listen_w
+        listen_y1 = self.input_y + 1
+        listen_y2 = self.status_y - 1
+        draw.rounded_rectangle([listen_x1, listen_y1, listen_x2, listen_y2], radius=6, fill=(40, 100, 160))
+        _, _, lw, lh = draw.textbbox((0, 0), "Listen", font=self.font_body_bold)
+        lx = listen_x1 + (listen_w - lw) // 2
+        ly = self.input_y + 25 - lh // 2
+        draw.text((lx, ly), "Listen", font=self.font_body_bold, fill=(255, 255, 255))
+
+        # Send button
         _, _, w, h = draw.textbbox((0, 0), "Send", font=self.font_body_bold)
         sx = self.width - 50 - w // 2
         sy = self.input_y + 25 - h // 2

@@ -1,0 +1,13 @@
+# Development dependencies for SAKSHAM (optional)
+# Testing
+pytest
+
+# Linting / formatting
+black
+flake8
+
+# Static typing (optional)
+mypy
+
+# Pre-commit hooks
+pre-commit

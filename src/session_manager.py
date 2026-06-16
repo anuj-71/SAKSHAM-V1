@@ -20,6 +20,8 @@ class ConversationSession:
         self.last_export_status = ""  # "", "Success", "Failed"
         self.typing_buffer = ""
         self.is_typing_focused = False
+        self.request_listen = False
+        self.last_error = ""
         
         # Ensure export directory exists
         os.makedirs("exports", exist_ok=True)

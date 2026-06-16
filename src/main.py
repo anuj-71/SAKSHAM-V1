@@ -2,6 +2,7 @@ import cv2
 import time
 import logging
 import sys
+import threading
 
 import src.config.settings as config
 from src.camera.camera_manager import CameraManager
@@ -40,10 +41,15 @@ def mouse_callback(event, x, y, flags, param):
             if h - 86 <= y <= h - 36:
                 global_session.is_typing_focused = True
                 # Check if clicked on Send button (right side)
-                if x >= w - 100:
+                # Send button
+                if x >= w - 50:
                     if global_session.typing_buffer.strip():
                         global_session.add_message("Hearing Person", global_session.typing_buffer.strip(), source="Typed")
                     global_session.typing_buffer = ""
+                # Listen button area (left of Send; reserve 80px)
+                elif x >= w - 180 and x < w - 100:
+                    # Trigger manual listen via session flag; actual listen runs in main loop thread helper
+                    global_session.request_listen = True
             else:
                 global_session.is_typing_focused = False
 
@@ -133,6 +139,31 @@ def main():
     try:
         while True:
             t_start = time.perf_counter()
+
+            # Handle manual Listen requests (from UI click)
+            if getattr(session, 'request_listen', False):
+                # Avoid spawning duplicate manual listeners
+                if not getattr(session, 'is_manual_listening', False) and not getattr(speech_engine, 'is_manual_listening', False):
+                    def _manual_listen_worker():
+                        session.is_manual_listening = True
+                        try:
+                            logging.info("Manual listen requested — worker starting.")
+                            speech_engine.manual_listen()
+                            if getattr(speech_engine, 'last_error', None):
+                                session.last_error = speech_engine.last_error
+                                session.set_toast(f"Mic: {session.last_error}")
+                        except Exception as e:
+                            logging.exception(f"Manual listen worker failed: {e}")
+                            session.last_error = str(e)
+                        finally:
+                            session.request_listen = False
+                            session.is_manual_listening = False
+
+                    t = threading.Thread(target=_manual_listen_worker, daemon=True)
+                    t.start()
+                else:
+                    # already listening — clear request to avoid repeats
+                    session.request_listen = False
 
             # ── 1. Grab frame ──────────────────────────────────────────
             success, raw_frame = camera.get_frame()

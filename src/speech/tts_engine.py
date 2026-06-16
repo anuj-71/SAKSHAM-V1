@@ -1,40 +1,61 @@
 import threading
 import queue
 import logging
-import pythoncom
+import asyncio
+import tempfile
+import os
+import time
 
 try:
-    import pyttsx3
+    import edge_tts
 except ImportError:
-    pass
+    edge_tts = None
+
+try:
+    import pygame
+except ImportError:
+    pygame = None
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
 
 class BaseTTSEngine:
     """Base class for Text-to-Speech engines."""
     def start(self):
         pass
+
     def stop(self):
         pass
+
     def speak(self, text: str):
         pass
 
+
 class PyTTSx3Engine(BaseTTSEngine):
     """
-    Offline Text-to-Speech Engine using pyttsx3.
-    Runs on a background thread to prevent blocking the UI loop.
+    Text-to-Speech Engine using edge-tts for synthesis and pygame for playback.
+    Preserves the original public API (start, stop, speak) and callbacks
+    `on_speech_start` and `on_speech_end`. Uses a background thread and a queue
+    to ensure sequential playback of utterances.
     """
-    def __init__(self, on_speech_start=None, on_speech_end=None):
+    def __init__(self, on_speech_start=None, on_speech_end=None, voice: str = "en-US-JennyNeural"):
         self.speech_queue = queue.Queue()
         self.is_running = False
         self.thread = None
         self.on_speech_start = on_speech_start
         self.on_speech_end = on_speech_end
+        self.voice = voice
 
     def start(self):
         if self.is_running:
             return
-            
+        # Initialize pygame mixer for playback
+        if pygame:
+            try:
+                pygame.mixer.init()
+            except Exception:
+                logging.exception("Failed to initialize pygame mixer")
+
         self.is_running = True
         self.thread = threading.Thread(target=self._tts_loop, daemon=True)
         self.thread.start()
@@ -46,6 +67,11 @@ class PyTTSx3Engine(BaseTTSEngine):
         self.speech_queue.put(None)
         if self.thread:
             self.thread.join(timeout=2.0)
+        try:
+            if pygame:
+                pygame.mixer.quit()
+        except Exception:
+            pass
         logging.info("PyTTSx3Engine stopped.")
 
     def speak(self, text: str):
@@ -54,42 +80,88 @@ class PyTTSx3Engine(BaseTTSEngine):
             logging.info(f"TTS QUEUED: '{text}'")
             self.speech_queue.put(text.strip())
 
+    def _synthesize_to_file(self, text: str, filename: str):
+        if edge_tts is None:
+            raise RuntimeError("edge-tts is not installed")
+
+        async def _save():
+            communicate = edge_tts.Communicate(text, voice=self.voice)
+            await communicate.save(filename)
+
+        # Run the async save in a fresh event loop
+        try:
+            asyncio.run(_save())
+        except Exception:
+            logging.exception("TTS ERROR during synthesis")
+            raise
+
+    def _play_file(self, filename: str):
+        if pygame is None:
+            raise RuntimeError("pygame is not installed")
+        try:
+            pygame.mixer.music.load(filename)
+            pygame.mixer.music.play()
+            while pygame.mixer.music.get_busy():
+                time.sleep(0.05)
+            # Unload the music to release the file handle
+            try:
+                pygame.mixer.music.unload()
+            except AttributeError:
+                pass # Fallback for older pygame versions where unload doesn't exist
+        except Exception:
+            logging.exception("TTS ERROR during playback")
+            raise
+
     def _tts_loop(self):
-        # pyttsx3 engine must be initialized in the same thread it is used
-        try:
-            pythoncom.CoInitialize()
-        except Exception as e:
-            logging.warning(f"Could not initialize COM: {e}")
-
-        try:
-            engine = pyttsx3.init()
-            # Optional: configure voice/rate here
-            engine.setProperty('rate', 150) # Slower, clearer speech
-        except Exception as e:
-            logging.error(f"Failed to initialize pyttsx3 engine: {e}")
-            return
-
         while self.is_running:
             try:
                 # Block until there is text to speak
                 text = self.speech_queue.get(timeout=0.5)
                 if text is None:
                     continue
-                    
-                logging.info(f"TTS STARTED: '{text}'")
-                
-                if self.on_speech_start:
-                    self.on_speech_start()
-                    
-                engine.say(text)
-                engine.runAndWait()
-                
-                if self.on_speech_end:
-                    self.on_speech_end()
 
-                logging.info(f"TTS FINISHED: '{text}'")
-                    
+                logging.info(f"TTS START: '{text}'")
+                if self.on_speech_start:
+                    try:
+                        self.on_speech_start()
+                    except Exception:
+                        logging.exception("on_speech_start handler raised")
+
+                tmp_fd, tmp_path = tempfile.mkstemp(suffix=".mp3")
+                os.close(tmp_fd)
+                try:
+                    # Synthesize
+                    try:
+                        self._synthesize_to_file(text, tmp_path)
+                    except Exception:
+                        logging.error(f"TTS ERROR: synthesis failed for '{text}'")
+                        continue
+
+                    # Play
+                    try:
+                        self._play_file(tmp_path)
+                    except Exception:
+                        logging.error(f"TTS ERROR: playback failed for '{text}'")
+                        continue
+
+                    logging.info(f"TTS FINISHED: '{text}'")
+                finally:
+                    try:
+                        if os.path.exists(tmp_path):
+                            os.remove(tmp_path)
+                    except Exception:
+                        logging.exception("Failed to delete temporary TTS file")
+
+                # Ensure the end callback runs
+                if self.on_speech_end:
+                    try:
+                        self.on_speech_end()
+                    except Exception:
+                        logging.exception("on_speech_end handler raised")
+
             except queue.Empty:
                 continue
-            except Exception as e:
-                logging.error(f"TTS FAILED: {e}")
+            except Exception:
+                logging.exception("Unexpected exception in TTS loop")
+                # keep loop alive
+                continue

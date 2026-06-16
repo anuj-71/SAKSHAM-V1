@@ -22,17 +22,33 @@ class SpeechEngine(BaseSpeechEngine):
         self.recognizer.dynamic_energy_threshold = True
         self.recognizer.pause_threshold = 0.8
         
-        self.mic = sr.Microphone()
+        # Defer Microphone creation into a safe block — PyAudio may be missing.
+        self.mic = None
         self.stop_listening_func: Optional[Callable] = None
         self.mic_available = False
 
+        # Manual listen state (used by UI when Listen button pressed)
+        self.is_manual_listening = False
+        self.last_error = None
+
         try:
-            with self.mic as source:
-                self.recognizer.adjust_for_ambient_noise(source, duration=0.5)
-            self.mic_available = True
-            logging.info("SpeechEngine: Microphone initialized successfully.")
+            # Attempt to instantiate the Microphone (this can raise if PyAudio is missing)
+            self.mic = sr.Microphone()
+            try:
+                with self.mic as source:
+                    self.recognizer.adjust_for_ambient_noise(source, duration=0.5)
+                self.mic_available = True
+                logging.info("SpeechEngine: Microphone initialized successfully.")
+            except Exception as inner_e:
+                logging.exception(f"SpeechEngine: Microphone present but failed during ambient adjust: {inner_e}")
+                self.last_error = str(inner_e)
+                self.mic_available = False
         except Exception as e:
-            logging.error(f"SpeechEngine: Microphone initialization failed: {e}")
+            # Common failure: PyAudio not installed or no audio drivers available.
+            logging.warning(f"SpeechEngine: Could not initialize Microphone (PyAudio may be missing): {e}")
+            self.last_error = "Could not find PyAudio; check installation"
+            self.mic = None
+            self.mic_available = False
 
         self.is_running = False
         self.is_paused = False
@@ -70,10 +86,70 @@ class SpeechEngine(BaseSpeechEngine):
         except sr.UnknownValueError:
             pass # Unintelligible audio, ignore
         except sr.RequestError as e:
-            logging.error(f"SpeechEngine: API request error: {e}")
+            logging.exception(f"SpeechEngine: API request error: {e}")
+            self.last_error = str(e)
         except Exception as e:
-            logging.error(f"SpeechEngine: Unexpected error during recognition: {e}")
+            logging.exception(f"SpeechEngine: Unexpected error during recognition: {e}")
+            self.last_error = str(e)
         finally:
+            if self.is_running and not self.is_paused:
+                self.update_state("Listening")
+
+    def manual_listen(self, timeout: float = 6.0, phrase_time_limit: float = 10.0):
+        """Performs a single-shot synchronous listen and recognition.
+
+        Intended to be called from a worker thread so it doesn't block the UI.
+        Adds result via the same duplicate-cooldown logic as the background callback.
+        """
+        if not self.mic_available:
+            logging.error("SpeechEngine.manual_listen: Microphone unavailable.")
+            self.last_error = "Microphone unavailable"
+            self.update_state("Error")
+            return
+
+        if self.is_manual_listening:
+            logging.info("SpeechEngine.manual_listen: Already listening (manual).")
+            return
+
+        self.is_manual_listening = True
+        try:
+            with self.mic as source:
+                logging.info("SpeechEngine.manual_listen: Listening (manual)...")
+                # Optional short ambient adjust before manual listen
+                try:
+                    self.recognizer.adjust_for_ambient_noise(source, duration=0.3)
+                except Exception:
+                    pass
+                self.update_state("Processing")
+                audio = self.recognizer.listen(source, timeout=timeout, phrase_time_limit=phrase_time_limit)
+
+            try:
+                text = self.recognizer.recognize_google(audio)
+            except sr.UnknownValueError:
+                logging.info("SpeechEngine.manual_listen: Unintelligible audio.")
+                return
+            except sr.RequestError as e:
+                logging.exception(f"SpeechEngine.manual_listen: API request error: {e}")
+                self.last_error = str(e)
+                self.update_state("Error")
+                return
+
+            if text:
+                text = text.strip()
+                if text:
+                    current_time = time.time()
+                    if text == self.last_recognized_text and (current_time - self.last_recognized_time) < self.duplicate_cooldown:
+                        logging.info(f"SpeechEngine.manual_listen: Ignored duplicate within cooldown: '{text}'")
+                    else:
+                        self.last_recognized_text = text
+                        self.last_recognized_time = current_time
+                        logging.info(f"SpeechEngine.manual_listen: Recognized: '{text}'")
+                        try:
+                            self.on_text_callback(text)
+                        except Exception:
+                            logging.exception("SpeechEngine.manual_listen: on_text_callback raised an exception")
+        finally:
+            self.is_manual_listening = False
             if self.is_running and not self.is_paused:
                 self.update_state("Listening")
 

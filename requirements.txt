@@ -1,0 +1,13 @@
+# requirements.txt for SAKSHAM (generated from direct imports)
+# Core runtime dependencies (unpinned - install latest compatible versions)
+opencv-python
+mediapipe
+numpy
+pillow
+SpeechRecognition
+edge-tts
+pygame
+
+# PyAudio: SpeechRecognition microphone support typically requires PyAudio on Windows.
+# On Windows, it's often easiest to install a prebuilt wheel for PyAudio if pip build fails.
+PyAudio

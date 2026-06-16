@@ -1,0 +1,179 @@
+import time
+import logging
+import numpy as np
+from typing import Dict, Optional, Callable
+from collections import deque
+
+from src.sign_language.tracker import HandTracker
+from src.sign_language.dataset_manager import DatasetManager
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+class SignLanguageEngine:
+    """
+    Core engine for processing hand tracking data and recognizing sign language.
+    Includes a dummy heuristic vocabulary for Phase 2 demonstration.
+    """
+    def __init__(self, on_sign_recognized: Optional[Callable[[str], None]] = None):
+        self.tracker = HandTracker()
+        self.dataset_manager = DatasetManager()
+        self.on_sign_recognized = on_sign_recognized
+        
+        # Temporal buffer for holding sequences of landmarks
+        self.sequence_buffer = deque(maxlen=30)
+        
+        # Debouncing / Cooldown
+        self.sign_cooldowns: Dict[str, float] = {}
+        self.cooldown_seconds = 2.5
+        self.confidence_threshold = 0.75
+        
+        # State Machine
+        self.current_candidate = None
+        self.candidate_frames = 0
+        self.frames_to_confirm = 5
+
+    def process_frame(self, frame) -> tuple[bool, Dict]:
+        """
+        Process a single video frame. Extracts landmarks, updates sequence buffer,
+        and optionally triggers recognition logic.
+        """
+        success, hand_data = self.tracker.process_frame(frame)
+        
+        if success and hand_data:
+            # 1. Update temporal buffer
+            self.sequence_buffer.append({
+                "timestamp": time.time(),
+                "landmarks": hand_data.get("landmarks", []),
+                "finger_states": hand_data.get("finger_states", {})
+            })
+            
+            # 2. Add to dataset if recording
+            if self.dataset_manager.is_recording:
+                self.dataset_manager.add_frame_data(hand_data)
+                
+            # 3. Attempt recognition
+            self._attempt_recognition(hand_data)
+            
+        return success, hand_data
+
+    def _attempt_recognition(self, hand_data: Dict):
+        """
+        Attempts to recognize a sign from the current frame or sequence buffer.
+        """
+        current_time = time.time()
+        
+        # Simple Heuristic Recognition for Demo Vocabulary:
+        # HELLO, YES, NO, THANK YOU, HELP, STOP, WATER
+        
+        finger_states = hand_data.get("finger_states", {})
+        landmarks = hand_data.get("landmarks", [])
+        
+        if not finger_states or not landmarks:
+            return
+
+        # Extract individual states
+        thumb = finger_states.get("thumb", False)
+        index = finger_states.get("index", False)
+        middle = finger_states.get("middle", False)
+        ring = finger_states.get("ring", False)
+        pinky = finger_states.get("pinky", False)
+        
+        detected_sign = None
+        confidence = 0.0
+
+        # Heuristic rules (dummy implementation for demonstration)
+        if thumb and index and middle and ring and pinky:
+            y_base = landmarks[0][1] # wrist
+            y_middle_tip = landmarks[12][1]
+            if (y_base - y_middle_tip) > 0.4: # Hand pointing strongly upwards
+                detected_sign = "STOP"
+                confidence = 0.85
+            else:
+                detected_sign = "HELLO"
+                confidence = 0.80
+
+        elif thumb and not index and not middle and not ring and not pinky:
+            detected_sign = "YES"
+            confidence = 0.90
+            
+        elif not thumb and index and not middle and not ring and not pinky:
+            detected_sign = "NO"
+            confidence = 0.75
+
+        elif thumb and index and middle and not ring and not pinky:
+            detected_sign = "WATER"
+            confidence = 0.85
+            
+        elif not thumb and not index and not middle and not ring and not pinky:
+            detected_sign = "HELP"
+            confidence = 0.80
+
+        if detected_sign in ("HELLO", "STOP") and len(self.sequence_buffer) > 10:
+            past_wrist_y = self.sequence_buffer[-10]["landmarks"][0][1]
+            current_wrist_y = landmarks[0][1]
+            if (current_wrist_y - past_wrist_y) > 0.1: # moved down
+                detected_sign = "THANK YOU"
+                confidence = 0.88
+
+        # --- State Machine: Detected -> Candidate -> Confirmed ---
+        if detected_sign and confidence >= self.confidence_threshold:
+            if detected_sign == self.current_candidate:
+                self.candidate_frames += 1
+            else:
+                self.current_candidate = detected_sign
+                self.candidate_frames = 1
+                
+            if self.candidate_frames >= self.frames_to_confirm:
+                # --- Confirmed State ---
+                confirmed_sign = self.current_candidate
+                
+                # Cooldown check (per sign)
+                last_time = self.sign_cooldowns.get(confirmed_sign, 0.0)
+                if current_time - last_time >= self.cooldown_seconds:
+                    # Update cooldown
+                    self.sign_cooldowns[confirmed_sign] = current_time
+                    
+                    logging.info(f"Sign Confirmed: {confirmed_sign} (Conf: {confidence:.2f})")
+                    
+                    # Dataset Logging for confirmed sign
+                    self._log_confirmed_sign(confirmed_sign, confidence, hand_data)
+                    
+                    if self.on_sign_recognized:
+                        self.on_sign_recognized(confirmed_sign)
+                        
+                # Reset candidate after confirmation or cooldown skip
+                self.current_candidate = None
+                self.candidate_frames = 0
+        else:
+            # If sign is lost or changed, reset candidate state
+            self.current_candidate = None
+            self.candidate_frames = 0
+
+    def _log_confirmed_sign(self, label: str, confidence: float, hand_data: Dict):
+        """Logs a confirmed sign to a standalone file for dataset training."""
+        import json, os
+        log_file = os.path.join(self.dataset_manager.data_dir, "confirmed_signs_log.jsonl")
+        
+        entry = {
+            "timestamp": time.time(),
+            "label": label,
+            "confidence": confidence,
+            "hand_label": hand_data.get("label", "Unknown"),
+            "landmarks": [coord for pt in hand_data.get("landmarks", []) for coord in pt]
+        }
+        
+        try:
+            with open(log_file, "a") as f:
+                f.write(json.dumps(entry) + "\n")
+        except Exception as e:
+            logging.error(f"Failed to log confirmed sign: {e}")
+
+    # Dataset pass-through methods
+    def start_recording(self, label: str):
+        self.dataset_manager.start_recording(label)
+        
+    def stop_recording(self):
+        self.dataset_manager.stop_recording()
+        
+    def export_dataset(self, format: str = "json"):
+        self.dataset_manager.export_dataset(format)

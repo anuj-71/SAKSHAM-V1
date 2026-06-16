@@ -30,24 +30,27 @@ class UIRenderer:
         # ── Layout constants ──────────────────────────────────────────
         self.header_h = 60
         self.status_h = 36
-        self.bottom_h = 200
+        self.input_h = 50
+        self.bottom_h = 300
 
         self.conv_y = self.header_h
-        self.conv_h = self.height - self.header_h - self.bottom_h - self.status_h
-
-        self.bottom_y = self.conv_y + self.conv_h
+        
         self.status_y = self.height - self.status_h
+        self.input_y = self.status_y - self.input_h
+        self.bottom_y = self.input_y - self.bottom_h
+
+        self.conv_h = self.bottom_y - self.conv_y
 
         # Bottom section split: 65% live transcript, 35% camera + stats
         self.live_panel_w = int(self.width * 0.65)
         self.right_panel_x = self.live_panel_w
 
-        # Camera preview – small, just enough to confirm it's working
-        self.cam_h = 120
-        self.cam_w = int(self.cam_h * 16 / 9)  # ~213px
+        # Camera preview – fills most of the right panel
+        self.cam_h = 225
+        self.cam_w = int(self.cam_h * 16 / 9)  # 400px
 
-        # Chat bubble max width: 65% of conversation area width
-        self.max_bubble_w_ratio = 0.65
+        # Chat bubble max width: 80% of conversation area width
+        self.max_bubble_w_ratio = 0.80
 
         # ── Fonts (Windows Defaults) ──────────────────────────────────
         font_path = "C:/Windows/Fonts/segoeui.ttf"
@@ -98,17 +101,29 @@ class UIRenderer:
         # Bottom section divider
         cv2.line(ui_frame, (0, self.bottom_y), (self.width, self.bottom_y), config.COLOR_DIVIDER, 1)
 
+        # Input Bar divider
+        cv2.line(ui_frame, (0, self.input_y), (self.width, self.input_y), config.COLOR_DIVIDER, 1)
+
         # Vertical divider in bottom section (live transcript | camera+stats)
         cv2.line(ui_frame, (self.live_panel_w, self.bottom_y),
-                 (self.live_panel_w, self.status_y), config.COLOR_DIVIDER, 1)
+                 (self.live_panel_w, self.input_y), config.COLOR_DIVIDER, 1)
 
         # Status bar background
         cv2.rectangle(ui_frame, (0, self.status_y), (self.width, self.height), (20, 20, 20), -1)
         cv2.line(ui_frame, (0, self.status_y), (self.width, self.status_y), config.COLOR_DIVIDER, 1)
 
-        # Live Transcript panel – slightly lighter background to differentiate
+        # Live Transcript panel – slightly lighter background
         cv2.rectangle(ui_frame, (0, self.bottom_y + 1),
-                      (self.live_panel_w - 1, self.status_y - 1), (35, 35, 35), -1)
+                      (self.live_panel_w - 1, self.input_y - 1), (35, 35, 35), -1)
+
+        # Input bar background
+        bg_input = (45, 45, 55) if getattr(session, 'is_typing_focused', False) else (30, 30, 35)
+        cv2.rectangle(ui_frame, (0, self.input_y + 1),
+                      (self.width, self.status_y - 1), bg_input, -1)
+                      
+        # Send button background
+        cv2.rectangle(ui_frame, (self.width - 100, self.input_y + 1),
+                      (self.width, self.status_y - 1), (60, 130, 60), -1)
 
         # Camera preview (right panel, top-right)
         cam_x = self.right_panel_x + 20
@@ -130,6 +145,7 @@ class UIRenderer:
         self._draw_header(draw)
         self._draw_conversation(draw, session, scroll_offset)
         self._draw_live_transcript(draw, session)
+        self._draw_input_bar(draw, session)
         self._draw_session_info(draw, session, cam_x, cam_y)
         self._draw_status_bar(draw, fps, session.mic_state, camera_frame is not None)
         self._draw_toast(draw, session)
@@ -161,22 +177,23 @@ class UIRenderer:
         avail_w = self.width - (padding_x * 2)
         max_bubble_w = int(avail_w * self.max_bubble_w_ratio)
         # How many chars fit – rough estimate for textwrap
-        chars_per_line = max(30, int(max_bubble_w / 10))
+        chars_per_line = max(40, int(max_bubble_w / 10))
 
-        bubble_pad = 12
-        bubble_gap = 10
+        bubble_pad = 10
+        bubble_gap = 4
 
         # Build layout bottom-up (newest at bottom)
         rendered: List[dict] = []
         for msg in reversed(session.messages):
-            header = f"[{msg['time']}]  {msg['sender']}"
+            source_tag = f" ({msg.get('source', '')})" if config.DEV_MODE and msg.get('source') else ""
+            header = f"[{msg['time']}]  {msg['sender']}{source_tag}"
             wrapped = textwrap.fill(msg['text'], width=chars_per_line)
             _, _, hw, hh = draw.textbbox((0, 0), header, font=self.font_small)
             _, _, tw, th = draw.textbbox((0, 0), wrapped, font=self.font_body)
             bw = min(max(hw, tw) + bubble_pad * 2, max_bubble_w)
             bh = hh + th + bubble_pad * 2 + 4
             rendered.append({
-                "header": header, "wrapped": wrapped,
+                "header": header, "wrapped": wrapped, "sender": msg["sender"],
                 "w": bw, "h": bh
             })
 
@@ -189,20 +206,30 @@ class UIRenderer:
             if cur_y < self.conv_y + 4:
                 break
 
+            # Alignment and styling based on sender
+            if b["sender"] == "Deaf User":
+                bx = self.width - padding_x - b["w"]
+                bg_color = (40, 50, 65, 255)       # slight bluish tint
+                border_color = (60, 80, 100, 255)
+            else:
+                bx = padding_x
+                bg_color = (42, 42, 48, 255)       # default gray
+                border_color = (70, 70, 75, 255)
+
             # Bubble background
             draw.rounded_rectangle(
-                [padding_x, cur_y, padding_x + b["w"], cur_y + b["h"]],
+                [bx, cur_y, bx + b["w"], cur_y + b["h"]],
                 radius=8,
-                fill=(42, 42, 48, 255),
-                outline=(70, 70, 75, 255)
+                fill=bg_color,
+                outline=border_color
             )
             # Header (timestamp + sender)
-            draw.text((padding_x + bubble_pad, cur_y + bubble_pad),
+            draw.text((bx + bubble_pad, cur_y + bubble_pad),
                       b["header"], font=self.font_small,
                       fill=self._bgr_to_rgb(config.COLOR_TEXT_SECONDARY))
             _, _, _, hh = draw.textbbox((0, 0), b["header"], font=self.font_small)
             # Body
-            draw.text((padding_x + bubble_pad, cur_y + bubble_pad + hh + 4),
+            draw.text((bx + bubble_pad, cur_y + bubble_pad + hh + 4),
                       b["wrapped"], font=self.font_body,
                       fill=self._bgr_to_rgb(config.COLOR_TEXT_PRIMARY))
 
@@ -276,6 +303,9 @@ class UIRenderer:
     def _draw_session_info(self, draw: ImageDraw.ImageDraw,
                            session: ConversationSession,
                            cam_x: int, cam_y: int):
+        if not config.DEV_MODE:
+            return
+            
         sx = cam_x + self.cam_w + 24
         sy = self.bottom_y + 15
 
@@ -301,6 +331,28 @@ class UIRenderer:
             draw.text((sx, sy), line, font=self.font_small,
                       fill=self._bgr_to_rgb(config.COLOR_TEXT_SECONDARY))
             sy += 22
+
+    # ──────────────────────────────────────────────────────────────────
+    #  Input Bar
+    # ──────────────────────────────────────────────────────────────────
+    def _draw_input_bar(self, draw: ImageDraw.ImageDraw, session: ConversationSession):
+        is_focused = getattr(session, 'is_typing_focused', False)
+        buf = getattr(session, 'typing_buffer', '')
+        
+        cursor = "|" if is_focused and int(time.time() * 2) % 2 == 0 else ""
+        display_text = buf + cursor
+        
+        # Draw placeholder or typed text
+        if not display_text and not is_focused:
+            draw.text((24, self.input_y + 14), "Type message here... (Click to focus or press ENTER)", font=self.font_body, fill=(150, 150, 150))
+        else:
+            draw.text((24, self.input_y + 14), display_text, font=self.font_body, fill=(255, 255, 255))
+            
+        # Draw Send button text
+        _, _, w, h = draw.textbbox((0, 0), "Send", font=self.font_body_bold)
+        sx = self.width - 50 - w // 2
+        sy = self.input_y + 25 - h // 2
+        draw.text((sx, sy), "Send", font=self.font_body_bold, fill=(255, 255, 255))
 
     # ──────────────────────────────────────────────────────────────────
     #  Status bar

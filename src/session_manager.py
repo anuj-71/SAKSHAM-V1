@@ -18,11 +18,13 @@ class ConversationSession:
         self.toast_expiry: float = 0.0
         self.last_export_path = ""
         self.last_export_status = ""  # "", "Success", "Failed"
+        self.typing_buffer = ""
+        self.is_typing_focused = False
         
         # Ensure export directory exists
         os.makedirs("exports", exist_ok=True)
 
-    def add_message(self, sender: str, text: str):
+    def add_message(self, sender: str, text: str, source: str = "System"):
         if not text.strip():
             return
             
@@ -31,9 +33,10 @@ class ConversationSession:
         self.messages.append({
             "sender": sender,
             "text": text,
-            "time": time_str
+            "time": time_str,
+            "source": source
         })
-        logging.info(f"[{time_str}] {sender}: {text}")
+        logging.info(f"[{time_str}] {sender} ({source}): {text}")
         
         # Clear draft when a final message is committed
         self.draft_message = ""

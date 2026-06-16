@@ -5,8 +5,9 @@ import sys
 
 import src.config.settings as config
 from src.camera.camera_manager import CameraManager
-from src.sign_language.tracker import HandTracker
+from src.sign_language.engine import SignLanguageEngine
 from src.speech.speech_engine import SpeechEngine
+from src.speech.tts_engine import PyTTSx3Engine
 from src.ui.renderer import UIRenderer
 from src.session_manager import ConversationSession
 
@@ -22,23 +23,40 @@ logging.basicConfig(
 
 # Global state for OpenCV callbacks
 scroll_offset = 0
+global_session = None
 
 def mouse_callback(event, x, y, flags, param):
-    global scroll_offset
+    global scroll_offset, global_session
     if event == cv2.EVENT_MOUSEWHEEL:
         if flags > 0:
             scroll_offset += 1  # Scroll Up
         else:
             scroll_offset -= 1  # Scroll Down
+    elif event == cv2.EVENT_LBUTTONDOWN:
+        if global_session:
+            # Check if clicked in Input Bar (height - 86 to height - 36)
+            h = config.FRAME_HEIGHT
+            w = config.FRAME_WIDTH
+            if h - 86 <= y <= h - 36:
+                global_session.is_typing_focused = True
+                # Check if clicked on Send button (right side)
+                if x >= w - 100:
+                    if global_session.typing_buffer.strip():
+                        global_session.add_message("Hearing Person", global_session.typing_buffer.strip(), source="Typed")
+                    global_session.typing_buffer = ""
+            else:
+                global_session.is_typing_focused = False
 
 def main():
     global scroll_offset
     
     logging.info("==========================================")
-    logging.info("        SAKSHAM V1.5 STARTED              ")
+    logging.info("        SAKSHAM V2.0 STARTED              ")
     logging.info("==========================================")
 
     session = ConversationSession()
+    global global_session
+    global_session = session
 
     # ── Module initialisation ──────────────────────────────────────────────
     camera = CameraManager(
@@ -50,17 +68,50 @@ def main():
         logging.critical("Failed to start the camera. Exiting.")
         sys.exit(1)
 
-    tracker = HandTracker()
     ui = UIRenderer(width=config.FRAME_WIDTH, height=config.FRAME_HEIGHT)
     
-    # Initialize speech engine with callbacks
+    # ── Text-to-Speech Engine ──
+    def on_tts_start():
+        logging.info("TTS started speaking, pausing STT mic.")
+        speech_engine.pause()
+        
+    def on_tts_end():
+        logging.info("TTS finished speaking, resuming STT mic.")
+        speech_engine.resume()
+        
+    tts_engine = PyTTSx3Engine(on_speech_start=on_tts_start, on_speech_end=on_tts_end)
+    tts_engine.start()
+
+    # ── Sign Language Engine ──
+    SIGN_TO_PHRASE = {
+        "HELLO": "Hello",
+        "HELP": "I need help",
+        "WATER": "I need water",
+        "THANK YOU": "Thank you",
+        "STOP": "Please stop",
+        "YES": "Yes",
+        "NO": "No"
+    }
+
+    def on_sign_recognized(raw_sign_label: str):
+        # 1. Add RAW sign label to the conversation history
+        session.add_message("Deaf User", raw_sign_label, source="Sign")
+        
+        # 2. Map to a natural phrase and speak it
+        spoken_phrase = SIGN_TO_PHRASE.get(raw_sign_label, raw_sign_label)
+        tts_engine.speak(spoken_phrase)
+
+    sl_engine = SignLanguageEngine(on_sign_recognized=on_sign_recognized)
+    
+    # ── Speech-to-Text Engine ──
     def on_speech_text(text: str):
-        session.add_message("Hearing Person", text)
+        session.add_message("Hearing Person", text, source="Speech")
         
     def on_speech_state(state: str):
         session.mic_state = state
         if state == "Listening":
-            session.set_draft("...")
+            if not session.draft_message:
+                session.set_draft("...")
         elif state == "Processing":
             session.set_draft("Transcribing...")
         else:
@@ -73,7 +124,7 @@ def main():
     ema_alpha = 0.1
     elapsed_time = 1.0 / config.TARGET_FPS
 
-    window_name = "SAKSHAM V1 - AI Communication Assistant"
+    window_name = "SAKSHAM V2 - AI Communication Assistant"
     cv2.namedWindow(window_name, cv2.WINDOW_AUTOSIZE)
     cv2.setMouseCallback(window_name, mouse_callback)
 
@@ -92,8 +143,8 @@ def main():
 
             frame = cv2.flip(raw_frame, 1)
 
-            # ── 2. Hand tracking (Dev Mode only right now) ──
-            hand_detected, hand_data = tracker.process_frame(frame)
+            # ── 2. Sign Language Tracking & Recognition ──
+            hand_detected, hand_data = sl_engine.process_frame(frame)
 
             # ── 3. Render UI ─────────────────────────────────────────
             annotated_frame = ui.render(
@@ -108,24 +159,38 @@ def main():
             cv2.imshow(window_name, annotated_frame)
             key = cv2.waitKey(1) & 0xFF
 
-            if key in (ord('q'), 27):
-                logging.info("Quit key pressed.")
-                break
-            elif key == ord('d'):
-                config.DEV_MODE = not config.DEV_MODE
-                logging.info(f"Developer Mode: {'ON' if config.DEV_MODE else 'OFF'}")
-            elif key == ord('c'):
-                session.clear()
-            elif key == ord('e'):
-                session.export()
-            elif key == ord('o'):
-                # Open exports folder in Explorer (Windows)
-                import subprocess, shlex
-                try:
-                    subprocess.Popen(['explorer', 'exports'], cwd='e:/gessture')
-                    logging.info('Opened exports folder.')
-                except Exception as e:
-                    logging.error(f'Failed to open exports folder: {e}')
+            if key != 255: # A key was pressed
+                if session.is_typing_focused:
+                    if key == 13: # Enter
+                        if session.typing_buffer.strip():
+                            session.add_message("Hearing Person", session.typing_buffer.strip(), source="Typed")
+                        session.typing_buffer = ""
+                    elif key == 27: # Esc
+                        session.is_typing_focused = False
+                        session.typing_buffer = ""
+                    elif key == 8: # Backspace
+                        session.typing_buffer = session.typing_buffer[:-1]
+                    elif 32 <= key <= 126: # Printable ASCII
+                        session.typing_buffer += chr(key)
+                else:
+                    if key in (ord('q'), ord('Q'), 27):
+                        logging.info("Quit key pressed.")
+                        break
+                    elif key in (ord('d'), ord('D')):
+                        config.DEV_MODE = not config.DEV_MODE
+                        logging.info(f"Developer Mode: {'ON' if config.DEV_MODE else 'OFF'}")
+                    elif key in (ord('c'), ord('C')):
+                        session.clear()
+                    elif key in (ord('e'), ord('E')):
+                        session.export()
+                    elif key in (ord('o'), ord('O')):
+                        # Open exports folder in Explorer (Windows)
+                        import subprocess
+                        try:
+                            subprocess.Popen('explorer exports', shell=True, cwd='e:/gessture')
+                            logging.info('Opened exports folder.')
+                        except Exception as e:
+                            logging.error(f'Failed to open exports folder: {e}')
 
             # Keyboard scrolling fallback
             if key == 0:  # Up Arrow
@@ -155,8 +220,9 @@ def main():
     finally:
         camera.stop()
         speech_engine.stop()
+        tts_engine.stop()
         cv2.destroyAllWindows()
-        logging.info("SAKSHAM V1.5 shutdown cleanly.")
+        logging.info("SAKSHAM V2.0 shutdown cleanly.")
         logging.info("==========================================")
 
 if __name__ == "__main__":

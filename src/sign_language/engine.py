@@ -32,6 +32,14 @@ class SignLanguageEngine:
         self.candidate_frames = 0
         self.frames_to_confirm = 5
 
+    @staticmethod
+    def _buffer_hand(hand: Dict) -> Dict:
+        return {
+            "present": bool(hand.get("present")),
+            "landmarks": hand.get("landmarks", []),
+            "finger_states": hand.get("finger_states", {}),
+        }
+
     def process_frame(self, frame) -> tuple[bool, Dict]:
         """
         Process a single video frame. Extracts landmarks, updates sequence buffer,
@@ -43,8 +51,11 @@ class SignLanguageEngine:
             # 1. Update temporal buffer
             self.sequence_buffer.append({
                 "timestamp": time.time(),
-                "landmarks": hand_data.get("landmarks", []),
-                "finger_states": hand_data.get("finger_states", {})
+                "primary_hand": hand_data.get("primary_hand"),
+                "primary_landmarks": hand_data.get("landmarks", []),
+                "primary_finger_states": hand_data.get("finger_states", {}),
+                "left_hand": self._buffer_hand(hand_data.get("left_hand", {})),
+                "right_hand": self._buffer_hand(hand_data.get("right_hand", {})),
             })
             
             # 2. Add to dataset if recording
@@ -109,11 +120,13 @@ class SignLanguageEngine:
             confidence = 0.80
 
         if detected_sign in ("HELLO", "STOP") and len(self.sequence_buffer) > 10:
-            past_wrist_y = self.sequence_buffer[-10]["landmarks"][0][1]
-            current_wrist_y = landmarks[0][1]
-            if (current_wrist_y - past_wrist_y) > 0.1: # moved down
-                detected_sign = "THANK YOU"
-                confidence = 0.88
+            past_landmarks = self.sequence_buffer[-10].get("primary_landmarks", [])
+            if past_landmarks:
+                past_wrist_y = past_landmarks[0][1]
+                current_wrist_y = landmarks[0][1]
+                if (current_wrist_y - past_wrist_y) > 0.1: # moved down
+                    detected_sign = "THANK YOU"
+                    confidence = 0.88
 
         # --- State Machine: Detected -> Candidate -> Confirmed ---
         if detected_sign and confidence >= self.confidence_threshold:
@@ -159,7 +172,11 @@ class SignLanguageEngine:
             "label": label,
             "confidence": confidence,
             "hand_label": hand_data.get("label", "Unknown"),
-            "landmarks": [coord for pt in hand_data.get("landmarks", []) for coord in pt]
+            "primary_landmarks": [coord for pt in hand_data.get("landmarks", []) for coord in pt],
+            "left_hand_present": hand_data.get("left_hand", {}).get("present", False),
+            "right_hand_present": hand_data.get("right_hand", {}).get("present", False),
+            "left_landmarks": [coord for pt in hand_data.get("left_hand", {}).get("landmarks", []) for coord in pt],
+            "right_landmarks": [coord for pt in hand_data.get("right_hand", {}).get("landmarks", []) for coord in pt],
         }
         
         try:
@@ -169,11 +186,23 @@ class SignLanguageEngine:
             logging.error(f"Failed to log confirmed sign: {e}")
 
     # Dataset pass-through methods
-    def start_recording(self, label: str):
-        self.dataset_manager.start_recording(label)
+    def start_recording(self, label: str, signer_id: str = "SIGNER_01"):
+        self.dataset_manager.start_recording(label, signer_id)
         
     def stop_recording(self):
-        self.dataset_manager.stop_recording()
+        return self.dataset_manager.stop_recording()
+
+    def accept_recording(self):
+        return self.dataset_manager.accept_current_clip()
+
+    def reject_recording(self, reason: str = "Rejected"):
+        return self.dataset_manager.reject_current_clip(reason)
+
+    def has_review_clip(self) -> bool:
+        return self.dataset_manager.has_review_clip()
+
+    def get_review_summary(self):
+        return self.dataset_manager.get_review_summary()
         
     def export_dataset(self, format: str = "json"):
         self.dataset_manager.export_dataset(format)

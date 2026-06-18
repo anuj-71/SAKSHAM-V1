@@ -2,7 +2,6 @@ import cv2
 import time
 import logging
 import sys
-import threading
 
 import src.config.settings as config
 from src.camera.camera_manager import CameraManager
@@ -39,17 +38,18 @@ def mouse_callback(event, x, y, flags, param):
             h = config.FRAME_HEIGHT
             w = config.FRAME_WIDTH
             if h - 86 <= y <= h - 36:
-                global_session.is_typing_focused = True
-                # Check if clicked on Send button (right side)
-                # Send button
-                if x >= w - 50:
+                mic_x1 = w - 210
+                mic_x2 = w - 110
+                if x >= w - 100:
                     if global_session.typing_buffer.strip():
                         global_session.add_message("Hearing Person", global_session.typing_buffer.strip(), source="Typed")
                     global_session.typing_buffer = ""
-                # Listen button area (left of Send; reserve 80px)
-                elif x >= w - 180 and x < w - 100:
-                    # Trigger manual listen via session flag; actual listen runs in main loop thread helper
-                    global_session.request_listen = True
+                    global_session.is_typing_focused = False
+                elif mic_x1 <= x <= mic_x2:
+                    global_session.request_mic_toggle = True
+                    global_session.is_typing_focused = False
+                else:
+                    global_session.is_typing_focused = True
             else:
                 global_session.is_typing_focused = False
 
@@ -79,11 +79,13 @@ def main():
     # ── Text-to-Speech Engine ──
     def on_tts_start():
         logging.info("TTS started speaking, pausing STT mic.")
-        speech_engine.pause()
+        if session.mic_enabled:
+            speech_engine.pause()
         
     def on_tts_end():
         logging.info("TTS finished speaking, resuming STT mic.")
-        speech_engine.resume()
+        if session.mic_enabled:
+            speech_engine.resume()
         
     tts_engine = PyTTSx3Engine(on_speech_start=on_tts_start, on_speech_end=on_tts_end)
     tts_engine.start()
@@ -100,6 +102,8 @@ def main():
     }
 
     def on_sign_recognized(raw_sign_label: str):
+        if session.dataset_mode:
+            return
         # 1. Add RAW sign label to the conversation history
         session.add_message("Deaf User", raw_sign_label, source="Sign")
         
@@ -124,7 +128,73 @@ def main():
             session.set_draft("")
 
     speech_engine = SpeechEngine(on_text_callback=on_speech_text, on_state_callback=on_speech_state)
-    speech_engine.start()
+
+    def toggle_mic():
+        if session.mic_enabled:
+            speech_engine.stop()
+            session.mic_enabled = False
+            session.mic_state = "Mic Off"
+            session.set_draft("")
+            session.set_toast("Microphone Off")
+            return
+
+        speech_engine.start()
+        if speech_engine.is_running:
+            session.mic_enabled = True
+            session.set_toast("Microphone On")
+        else:
+            session.mic_enabled = False
+            session.mic_state = "Error" if speech_engine.last_error else "Mic Off"
+            if speech_engine.last_error:
+                session.last_error = speech_engine.last_error
+                session.set_toast(f"Mic: {speech_engine.last_error}")
+
+    def start_dataset_recording():
+        if sl_engine.has_review_clip():
+            session.set_toast("Review or reject the pending clip first")
+            return
+        sl_engine.start_recording(session.current_dataset_label, session.current_signer_id)
+        session.set_dataset_status("Recording")
+        session.set_dataset_review_summary(None)
+        session.set_toast(f"Recording {session.current_dataset_label} for {session.current_signer_id}")
+
+    def stop_dataset_recording():
+        review = sl_engine.stop_recording()
+        session.set_dataset_review_summary(review)
+        session.set_dataset_status("Review" if review else "Idle")
+        if review:
+            session.set_toast(f"Clip ready for review: {review['frame_count']} frames")
+
+    def accept_dataset_clip():
+        saved = sl_engine.accept_recording()
+        if not saved:
+            return
+        session.mark_dataset_clip_saved(saved["label"])
+        session.set_dataset_review_summary(None)
+        session.set_dataset_status("Idle")
+        session.set_toast(f"Saved clip: {saved['label']} ({saved['frame_count']} frames)")
+
+    def reject_dataset_clip(reason: str = "Rejected"):
+        rejected = sl_engine.reject_recording(reason)
+        if not rejected:
+            return
+        session.set_dataset_review_summary(None)
+        session.set_dataset_status("Idle")
+        session.set_toast(f"Clip discarded: {rejected['label']}")
+
+    def toggle_dataset_mode():
+        if session.dataset_mode:
+            if sl_engine.dataset_manager.is_recording:
+                stop_dataset_recording()
+                reject_dataset_clip("Cancelled when exiting dataset mode")
+            elif sl_engine.has_review_clip():
+                reject_dataset_clip("Cancelled when exiting dataset mode")
+            session.set_dataset_mode(False)
+            return
+
+        session.set_dataset_mode(True)
+        session.set_dataset_status("Idle")
+        session.set_dataset_review_summary(None)
 
     main_fps = 0.0
     ema_alpha = 0.1
@@ -140,30 +210,9 @@ def main():
         while True:
             t_start = time.perf_counter()
 
-            # Handle manual Listen requests (from UI click)
-            if getattr(session, 'request_listen', False):
-                # Avoid spawning duplicate manual listeners
-                if not getattr(session, 'is_manual_listening', False) and not getattr(speech_engine, 'is_manual_listening', False):
-                    def _manual_listen_worker():
-                        session.is_manual_listening = True
-                        try:
-                            logging.info("Manual listen requested — worker starting.")
-                            speech_engine.manual_listen()
-                            if getattr(speech_engine, 'last_error', None):
-                                session.last_error = speech_engine.last_error
-                                session.set_toast(f"Mic: {session.last_error}")
-                        except Exception as e:
-                            logging.exception(f"Manual listen worker failed: {e}")
-                            session.last_error = str(e)
-                        finally:
-                            session.request_listen = False
-                            session.is_manual_listening = False
-
-                    t = threading.Thread(target=_manual_listen_worker, daemon=True)
-                    t.start()
-                else:
-                    # already listening — clear request to avoid repeats
-                    session.request_listen = False
+            if session.request_mic_toggle:
+                session.request_mic_toggle = False
+                toggle_mic()
 
             # ── 1. Grab frame ──────────────────────────────────────────
             success, raw_frame = camera.get_frame()
@@ -207,6 +256,10 @@ def main():
                     if key in (ord('q'), ord('Q'), 27):
                         logging.info("Quit key pressed.")
                         break
+                    elif key in (ord('m'), ord('M')):
+                        toggle_mic()
+                    elif key in (ord('k'), ord('K')):
+                        toggle_dataset_mode()
                     elif key in (ord('d'), ord('D')):
                         config.DEV_MODE = not config.DEV_MODE
                         logging.info(f"Developer Mode: {'ON' if config.DEV_MODE else 'OFF'}")
@@ -222,6 +275,30 @@ def main():
                             logging.info('Opened exports folder.')
                         except Exception as e:
                             logging.error(f'Failed to open exports folder: {e}')
+                    elif session.dataset_mode and key in (ord('j'), ord('J')):
+                        if not sl_engine.dataset_manager.is_recording and not sl_engine.has_review_clip():
+                            session.cycle_dataset_label(-1)
+                    elif session.dataset_mode and key in (ord('l'), ord('L')):
+                        if not sl_engine.dataset_manager.is_recording and not sl_engine.has_review_clip():
+                            session.cycle_dataset_label(1)
+                    elif session.dataset_mode and key in (ord('u'), ord('U')):
+                        if not sl_engine.dataset_manager.is_recording and not sl_engine.has_review_clip():
+                            session.cycle_dataset_signer(-1)
+                    elif session.dataset_mode and key in (ord('i'), ord('I')):
+                        if not sl_engine.dataset_manager.is_recording and not sl_engine.has_review_clip():
+                            session.cycle_dataset_signer(1)
+                    elif session.dataset_mode and key in (ord('r'), ord('R')):
+                        if sl_engine.dataset_manager.is_recording:
+                            stop_dataset_recording()
+                        elif sl_engine.has_review_clip():
+                            reject_dataset_clip("Re-record requested")
+                            start_dataset_recording()
+                        else:
+                            start_dataset_recording()
+                    elif session.dataset_mode and key in (ord('a'), ord('A')):
+                        accept_dataset_clip()
+                    elif session.dataset_mode and key in (ord('x'), ord('X')):
+                        reject_dataset_clip()
 
             # Keyboard scrolling fallback
             if key == 0:  # Up Arrow

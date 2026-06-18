@@ -5,6 +5,23 @@ import json
 import os
 import logging
 
+DEFAULT_DATASET_LABELS = [
+    "HELLO",
+    "HELP",
+    "WATER",
+    "THANK YOU",
+    "STOP",
+    "YES",
+    "NO",
+    "PLEASE",
+    "SORRY",
+    "GOOD",
+    "BAD",
+    "NO_SIGN",
+]
+
+DEFAULT_SIGNER_IDS = [f"SIGNER_{idx:02d}" for idx in range(1, 11)]
+
 class ConversationSession:
     """
     Manages the state and history of a SAKSHAM communication session.
@@ -13,15 +30,26 @@ class ConversationSession:
         self.messages: List[Dict] = []
         self.start_time = time.time()
         self.draft_message = ""
-        self.mic_state = "Idle" # Idle, Listening, Processing
+        self.mic_enabled = False
+        self.mic_state = "Mic Off"
         self.toast_message: Optional[str] = None
         self.toast_expiry: float = 0.0
         self.last_export_path = ""
         self.last_export_status = ""  # "", "Success", "Failed"
         self.typing_buffer = ""
         self.is_typing_focused = False
-        self.request_listen = False
+        self.request_mic_toggle = False
         self.last_error = ""
+
+        # Dataset collection state
+        self.dataset_mode = False
+        self.dataset_labels = list(DEFAULT_DATASET_LABELS)
+        self.dataset_label_index = 0
+        self.dataset_signer_ids = list(DEFAULT_SIGNER_IDS)
+        self.dataset_signer_index = 0
+        self.dataset_status = "Idle"
+        self.dataset_review_summary: Optional[Dict] = None
+        self.dataset_clip_counts: Dict[str, int] = {}
         
         # Ensure export directory exists
         os.makedirs("exports", exist_ok=True)
@@ -70,6 +98,45 @@ class ConversationSession:
     def set_toast(self, message: str, duration: float = 3.0):
         self.toast_message = message
         self.toast_expiry = time.time() + duration
+
+    @property
+    def current_dataset_label(self) -> str:
+        return self.dataset_labels[self.dataset_label_index]
+
+    @property
+    def current_signer_id(self) -> str:
+        return self.dataset_signer_ids[self.dataset_signer_index]
+
+    def cycle_dataset_label(self, delta: int):
+        if not self.dataset_labels:
+            return
+        self.dataset_label_index = (self.dataset_label_index + delta) % len(self.dataset_labels)
+        self.set_toast(f"Dataset Label: {self.current_dataset_label}")
+
+    def cycle_dataset_signer(self, delta: int):
+        if not self.dataset_signer_ids:
+            return
+        self.dataset_signer_index = (self.dataset_signer_index + delta) % len(self.dataset_signer_ids)
+        self.set_toast(f"Signer: {self.current_signer_id}")
+
+    def set_dataset_mode(self, enabled: bool):
+        self.dataset_mode = enabled
+        self.dataset_status = "Idle"
+        self.dataset_review_summary = None
+        mode = "ON" if enabled else "OFF"
+        self.set_toast(f"Dataset Mode: {mode}")
+
+    def set_dataset_status(self, status: str):
+        self.dataset_status = status
+
+    def set_dataset_review_summary(self, summary: Optional[Dict]):
+        self.dataset_review_summary = summary
+
+    def mark_dataset_clip_saved(self, label: str):
+        self.dataset_clip_counts[label] = self.dataset_clip_counts.get(label, 0) + 1
+
+    def get_dataset_clip_count(self, label: str) -> int:
+        return self.dataset_clip_counts.get(label, 0)
 
     def export(self) -> bool:
         """Exports the conversation to TXT and JSON in the exports/ directory."""

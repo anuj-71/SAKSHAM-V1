@@ -45,6 +45,9 @@ class PyTTSx3Engine(BaseTTSEngine):
         self.on_speech_start = on_speech_start
         self.on_speech_end = on_speech_end
         self.voice = voice
+        self.cache_dir = "tts_cache"
+        os.makedirs(self.cache_dir, exist_ok=True)
+        self.phrase_cache = {}
 
     def start(self):
         if self.is_running:
@@ -55,6 +58,8 @@ class PyTTSx3Engine(BaseTTSEngine):
                 pygame.mixer.init()
             except Exception:
                 logging.exception("Failed to initialize pygame mixer")
+
+        self._preload_cache()
 
         self.is_running = True
         self.thread = threading.Thread(target=self._tts_loop, daemon=True)
@@ -79,6 +84,24 @@ class PyTTSx3Engine(BaseTTSEngine):
         if text and text.strip():
             logging.info(f"TTS QUEUED: '{text}'")
             self.speech_queue.put(text.strip())
+
+    def _preload_cache(self):
+        phrases = [
+            "Hello", "I need help", "I need water", 
+            "Thank you", "Please stop", "Yes", "No"
+        ]
+        for phrase in phrases:
+            safe_name = "".join(c for c in phrase.lower() if c.isalnum() or c == " ").replace(" ", "_")
+            filename = os.path.join(self.cache_dir, f"{safe_name}.mp3")
+            if not os.path.exists(filename):
+                logging.info(f"Pre-synthesizing cache for: '{phrase}'")
+                try:
+                    self._synthesize_to_file(phrase, filename)
+                except Exception as e:
+                    logging.error(f"Failed to cache phrase '{phrase}': {e}")
+                    continue
+            self.phrase_cache[phrase.lower()] = filename
+        logging.info(f"TTS Phrase Cache loaded with {len(self.phrase_cache)} phrases.")
 
     def _synthesize_to_file(self, text: str, filename: str):
         if edge_tts is None:
@@ -127,30 +150,39 @@ class PyTTSx3Engine(BaseTTSEngine):
                     except Exception:
                         logging.exception("on_speech_start handler raised")
 
-                tmp_fd, tmp_path = tempfile.mkstemp(suffix=".mp3")
-                os.close(tmp_fd)
-                try:
-                    # Synthesize
+                cached_file = self.phrase_cache.get(text.lower().strip())
+                if cached_file and os.path.exists(cached_file):
+                    logging.info(f"TTS CACHE HIT: '{text}'")
                     try:
-                        self._synthesize_to_file(text, tmp_path)
+                        self._play_file(cached_file)
                     except Exception:
-                        logging.error(f"TTS ERROR: synthesis failed for '{text}'")
-                        continue
-
-                    # Play
-                    try:
-                        self._play_file(tmp_path)
-                    except Exception:
-                        logging.error(f"TTS ERROR: playback failed for '{text}'")
-                        continue
-
+                        logging.error(f"TTS ERROR: playback failed for cached '{text}'")
                     logging.info(f"TTS FINISHED: '{text}'")
-                finally:
+                else:
+                    tmp_fd, tmp_path = tempfile.mkstemp(suffix=".mp3")
+                    os.close(tmp_fd)
                     try:
-                        if os.path.exists(tmp_path):
-                            os.remove(tmp_path)
-                    except Exception:
-                        logging.exception("Failed to delete temporary TTS file")
+                        # Synthesize
+                        try:
+                            self._synthesize_to_file(text, tmp_path)
+                        except Exception:
+                            logging.error(f"TTS ERROR: synthesis failed for '{text}'")
+                            continue
+
+                        # Play
+                        try:
+                            self._play_file(tmp_path)
+                        except Exception:
+                            logging.error(f"TTS ERROR: playback failed for '{text}'")
+                            continue
+
+                        logging.info(f"TTS FINISHED: '{text}'")
+                    finally:
+                        try:
+                            if os.path.exists(tmp_path):
+                                os.remove(tmp_path)
+                        except Exception:
+                            logging.exception("Failed to delete temporary TTS file")
 
                 # Ensure the end callback runs
                 if self.on_speech_end:

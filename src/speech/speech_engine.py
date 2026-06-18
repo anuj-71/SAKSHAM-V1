@@ -56,44 +56,46 @@ class SpeechEngine(BaseSpeechEngine):
         self.last_recognized_time = 0.0
         self.duplicate_cooldown = 2.5
 
-    def _audio_callback(self, recognizer: sr.Recognizer, audio: sr.AudioData):
-        """Callback fired by SpeechRecognition background thread when a phrase completes."""
-        if not self.is_running or self.is_paused:
-            return
-            
-        try:
-            logging.debug("SpeechEngine: Audio captured, processing...")
-            self.update_state("Processing")
-            text = recognizer.recognize_google(audio)
-            
-            # Additional check to prevent TTS audio feedback if pause was slightly delayed
-            if self.is_paused:
-                logging.debug("SpeechEngine: Ignored speech because engine is paused.")
-                return
+    def _process_audio(self, audio: sr.AudioData):
+        """Processes audio in a worker thread to prevent blocking the listener."""
+        def worker():
+            try:
+                logging.debug("SpeechEngine: Audio captured, processing...")
+                if not self.is_manual_listening:
+                    self.update_state("Processing")
+                    
+                text = self.recognizer.recognize_google(audio)
                 
-            if text:
-                text = text.strip()
+                # Additional check to prevent TTS audio feedback if pause was slightly delayed
+                if self.is_paused:
+                    logging.debug("SpeechEngine: Ignored speech because engine is paused.")
+                    return
+                    
                 if text:
-                    current_time = time.time()
-                    if text == self.last_recognized_text and (current_time - self.last_recognized_time) < self.duplicate_cooldown:
-                        logging.info(f"SpeechEngine: Ignored duplicate speech within cooldown: '{text}'")
-                    else:
-                        self.last_recognized_text = text
-                        self.last_recognized_time = current_time
-                        logging.info(f"SpeechEngine: Speech recognized successfully: '{text}'")
-                        self.on_text_callback(text)
-                        logging.debug("SpeechEngine: Callback executed successfully.")
-        except sr.UnknownValueError:
-            pass # Unintelligible audio, ignore
-        except sr.RequestError as e:
-            logging.exception(f"SpeechEngine: API request error: {e}")
-            self.last_error = str(e)
-        except Exception as e:
-            logging.exception(f"SpeechEngine: Unexpected error during recognition: {e}")
-            self.last_error = str(e)
-        finally:
-            if self.is_running and not self.is_paused:
-                self.update_state("Listening")
+                    text = text.strip()
+                    if text:
+                        current_time = time.time()
+                        if text == self.last_recognized_text and (current_time - self.last_recognized_time) < self.duplicate_cooldown:
+                            logging.info(f"SpeechEngine: Ignored duplicate speech within cooldown: '{text}'")
+                        else:
+                            self.last_recognized_text = text
+                            self.last_recognized_time = current_time
+                            logging.info(f"SpeechEngine: Speech recognized successfully: '{text}'")
+                            self.on_text_callback(text)
+                            logging.debug("SpeechEngine: Callback executed successfully.")
+            except sr.UnknownValueError:
+                pass # Unintelligible audio, ignore
+            except sr.RequestError as e:
+                logging.exception(f"SpeechEngine: API request error: {e}")
+                self.last_error = str(e)
+            except Exception as e:
+                logging.exception(f"SpeechEngine: Unexpected error during recognition: {e}")
+                self.last_error = str(e)
+            finally:
+                if self.is_running and not self.is_paused and not self.is_manual_listening:
+                    self.update_state("Listening")
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def manual_listen(self, timeout: float = 6.0, phrase_time_limit: float = 10.0):
         """Performs a single-shot synchronous listen and recognition.
@@ -156,7 +158,7 @@ class SpeechEngine(BaseSpeechEngine):
     def pause(self):
         """Temporarily stop processing audio (e.g., when TTS is speaking)."""
         self.is_paused = True
-        self.update_state("Idle")
+        self.update_state("Mic Off")
 
     def resume(self):
         """Resume processing audio."""
@@ -177,20 +179,48 @@ class SpeechEngine(BaseSpeechEngine):
 
         self.is_running = True
         self.update_state("Listening")
-        logging.info("SpeechEngine: Starting background listening...")
-        self.stop_listening_func = self.recognizer.listen_in_background(
-            self.mic, 
-            self._audio_callback,
-            phrase_time_limit=10 
-        )
+        logging.info("SpeechEngine: Starting manual background listening loop...")
+        
+        self.stop_listening_func = True  # Used as a dummy flag for UI
+        self.listener_thread = threading.Thread(target=self._listen_loop, daemon=True)
+        self.listener_thread.start()
+
+    def _listen_loop(self):
+        try:
+            with self.mic as source:
+                while self.is_running:
+                    if self.is_paused:
+                        self.update_state("Idle")
+                        time.sleep(0.1)
+                        continue
+
+                    if not self.is_manual_listening:
+                        self.update_state("Listening")
+                        
+                    try:
+                        audio = self.recognizer.listen(source, timeout=1.0, phrase_time_limit=8.0)
+                    except sr.WaitTimeoutError:
+                        continue
+                    except Exception as e:
+                        if self.is_running:
+                            logging.exception(f"SpeechEngine: Error capturing audio: {e}")
+                        time.sleep(1)
+                        continue
+
+                    # If paused during recording, discard
+                    if self.is_paused or not self.is_running:
+                        continue
+
+                    self._process_audio(audio)
+        except Exception as e:
+            logging.exception(f"SpeechEngine: Listener loop crashed: {e}")
 
     def stop(self):
         if not self.is_running:
+            self.update_state("Mic Off")
             return
             
         logging.info("SpeechEngine: Stopping background listening...")
         self.is_running = False
-        if self.stop_listening_func:
-            self.stop_listening_func(wait_for_stop=False)
-            self.stop_listening_func = None
-        self.update_state("Idle")
+        self.stop_listening_func = None
+        self.update_state("Mic Off")

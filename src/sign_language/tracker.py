@@ -28,6 +28,18 @@ class HandTracker:
         self.connections = self.mp_hands.HAND_CONNECTIONS
         logging.info("MediaPipe Hands initialized with confidence thresholds >= 0.8.")
 
+    @staticmethod
+    def _empty_hand(label: str) -> Dict:
+        return {
+            "label": label,
+            "present": False,
+            "confidence": 0.0,
+            "landmarks": [],
+            "pixel_landmarks": [],
+            "finger_states": {},
+            "raw_mp_landmarks": None,
+        }
+
     def process_frame(self, frame: cv2.Mat) -> Tuple[bool, Dict]:
         """
         Processes a single BGR image frame.
@@ -44,37 +56,57 @@ class HandTracker:
             
         results = self.hands.process(rgb_frame)
         
-        hand_data = {}
-        
+        left_hand = self._empty_hand("Left")
+        right_hand = self._empty_hand("Right")
+
         if results.multi_hand_landmarks and results.multi_handedness:
-            # We only track the primary hand (MAX_NUM_HANDS = 1)
-            landmarks = results.multi_hand_landmarks[0]
-            handedness = results.multi_handedness[0]
-            
-            label = handedness.classification[0].label  # "Left" or "Right"
-            confidence = handedness.classification[0].score
-            
-            # Extract normalized (0.0 to 1.0) and pixel (scaled to original dimensions) coordinates
-            raw_landmarks = []
-            pixel_landmarks = []
-            for lm in landmarks.landmark:
-                raw_landmarks.append((lm.x, lm.y, lm.z))
-                pixel_landmarks.append((int(lm.x * w), int(lm.y * h)))
-            
-            # Determine which fingers are extended (Up = True, Down = False)
-            finger_states = self._get_finger_states(raw_landmarks, label)
-            
-            hand_data = {
-                "label": label,                     # "Left" or "Right"
-                "confidence": confidence,           # Tracking confidence
-                "landmarks": raw_landmarks,         # Normalized coordinates
-                "pixel_landmarks": pixel_landmarks, # Pixel coordinates
-                "finger_states": finger_states,     # Dict of finger -> True/False
-                "raw_mp_landmarks": landmarks       # Raw mediapipe object for drawing
-            }
-            return True, hand_data
-            
-        return False, {}
+            for landmarks, handedness in zip(results.multi_hand_landmarks, results.multi_handedness):
+                label = handedness.classification[0].label  # "Left" or "Right"
+                confidence = handedness.classification[0].score
+
+                raw_landmarks = []
+                pixel_landmarks = []
+                for lm in landmarks.landmark:
+                    raw_landmarks.append((lm.x, lm.y, lm.z))
+                    pixel_landmarks.append((int(lm.x * w), int(lm.y * h)))
+
+                finger_states = self._get_finger_states(raw_landmarks, label)
+                hand_entry = {
+                    "label": label,
+                    "present": True,
+                    "confidence": confidence,
+                    "landmarks": raw_landmarks,
+                    "pixel_landmarks": pixel_landmarks,
+                    "finger_states": finger_states,
+                    "raw_mp_landmarks": landmarks,
+                }
+
+                if label == "Left":
+                    if (not left_hand["present"]) or confidence >= left_hand["confidence"]:
+                        left_hand = hand_entry
+                elif label == "Right":
+                    if (not right_hand["present"]) or confidence >= right_hand["confidence"]:
+                        right_hand = hand_entry
+
+        hands_present = int(left_hand["present"]) + int(right_hand["present"])
+        if hands_present == 0:
+            return False, {}
+
+        primary_hand = right_hand if right_hand["present"] else left_hand
+        hand_data = {
+            "left_hand": left_hand,
+            "right_hand": right_hand,
+            "hands_present": hands_present,
+            "primary_hand": primary_hand["label"],
+            # Keep primary-hand aliases so the heuristic pipeline still works.
+            "label": primary_hand["label"],
+            "confidence": primary_hand["confidence"],
+            "landmarks": primary_hand["landmarks"],
+            "pixel_landmarks": primary_hand["pixel_landmarks"],
+            "finger_states": primary_hand["finger_states"],
+            "raw_mp_landmarks": primary_hand["raw_mp_landmarks"],
+        }
+        return True, hand_data
 
     def _get_finger_states(self, landmarks: List[Tuple[float, float, float]], handedness: str) -> Dict[str, bool]:
         """

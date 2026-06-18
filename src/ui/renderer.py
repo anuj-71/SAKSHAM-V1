@@ -134,10 +134,17 @@ class UIRenderer:
             cv2.rectangle(ui_frame, (cam_x, cam_y),
                           (cam_x + self.cam_w, cam_y + self.cam_h), config.COLOR_DIVIDER, 1)
 
-            if config.DEV_MODE and hand_data and "pixel_landmarks" in hand_data:
-                self._draw_dev_landmarks(ui_frame, hand_data["pixel_landmarks"], cam_x, cam_y)
+            if config.DEV_MODE and hand_data:
+                left_hand = hand_data.get("left_hand", {})
+                right_hand = hand_data.get("right_hand", {})
+                if left_hand.get("present") and left_hand.get("pixel_landmarks"):
+                    self._draw_dev_landmarks(ui_frame, left_hand["pixel_landmarks"], cam_x, cam_y, (255, 0, 255))
+                if right_hand.get("present") and right_hand.get("pixel_landmarks"):
+                    self._draw_dev_landmarks(ui_frame, right_hand["pixel_landmarks"], cam_x, cam_y, (0, 255, 255))
 
         # 2. PIL overlay for all text rendering
+        self._last_session_dataset_mode = session.dataset_mode
+        self._last_session_dataset_label = session.current_dataset_label
         img_rgb = cv2.cvtColor(ui_frame, cv2.COLOR_BGR2RGB)
         pil_img = Image.fromarray(img_rgb)
         draw = ImageDraw.Draw(pil_img, 'RGBA')
@@ -147,6 +154,7 @@ class UIRenderer:
         self._draw_live_transcript(draw, session)
         self._draw_input_bar(draw, session)
         self._draw_session_info(draw, session, cam_x, cam_y)
+        self._draw_dataset_panel(draw, session, cam_x, cam_y + self.cam_h + 10)
         self._draw_status_bar(draw, fps, session.mic_state, camera_frame is not None)
         self._draw_toast(draw, session)
 
@@ -162,7 +170,9 @@ class UIRenderer:
         draw.text((24, 40), "AI Communication Assistant",
                   font=self.font_subheader, fill=self._bgr_to_rgb(config.COLOR_TEXT_SECONDARY))
 
-        hint = "[C] Clear  [E] Export  [O] Open Exports  [D] Dev Mode"
+        hint = "[M] Mic  [K] Dataset  [J/L] Label  [U/I] Signer  [R] Rec  [A/X] Review  [C/E/D]"
+        if not getattr(self, "_last_session_dataset_mode", False):
+            hint = "[M] Mic  [K] Dataset  [C] Clear  [E] Export  [O] Open Exports  [D] Dev Mode"
         _, _, w, _ = draw.textbbox((0, 0), hint, font=self.font_small)
         draw.text((self.width - w - 24, 24), hint,
                   font=self.font_small, fill=self._bgr_to_rgb(config.COLOR_TEXT_SECONDARY))
@@ -290,12 +300,30 @@ class UIRenderer:
             draw.text((px, py), "\u274C  Microphone Error",
                       font=self.font_live_state, fill=(200, 60, 60))
 
-        else:  # Idle
-            draw.text((px, py), "\u23F8  Idle – Microphone standby",
+        else:  # Mic Off / Idle
+            draw.text((px, py), "\u23F8  Mic Off",
                       font=self.font_live_state, fill=(120, 120, 120))
             py += 28
-            draw.text((px, py), "Waiting for speech input...",
+            draw.text((px, py), "Enable the mic to start speech input.",
                       font=self.font_live, fill=(100, 100, 100))
+
+        if session.dataset_mode:
+            py += 54
+            info_lines = [
+                f"Dataset Mode: ON",
+                f"Label: {session.current_dataset_label}",
+                f"Signer: {session.current_signer_id}",
+                f"Status: {session.dataset_status}",
+            ]
+            if session.dataset_review_summary:
+                info_lines.append("Review: [A] Accept  [X] Reject  [R] Re-record")
+            else:
+                info_lines.append("Controls: [J/L] Label  [U/I] Signer  [R] Start/Stop")
+
+            for line in info_lines:
+                draw.text((px, py), line, font=self.font_small,
+                          fill=self._bgr_to_rgb(config.COLOR_TEXT_SECONDARY))
+                py += 18
 
     # ──────────────────────────────────────────────────────────────────
     #  Session Info panel  (bottom-right, below camera)
@@ -332,6 +360,36 @@ class UIRenderer:
                       fill=self._bgr_to_rgb(config.COLOR_TEXT_SECONDARY))
             sy += 22
 
+    def _draw_dataset_panel(self, draw: ImageDraw.ImageDraw,
+                            session: ConversationSession,
+                            cam_x: int, panel_y: int):
+        if not session.dataset_mode and not session.dataset_review_summary:
+            return
+
+        panel_x = cam_x
+        draw.text((panel_x, panel_y), "Dataset Collection",
+                  font=self.font_small_bold,
+                  fill=self._bgr_to_rgb(config.COLOR_TEXT_PRIMARY))
+        panel_y += 18
+
+        lines = [
+            f"Label: {session.current_dataset_label}  ({session.get_dataset_clip_count(session.current_dataset_label)} saved)",
+            f"Signer: {session.current_signer_id}",
+            f"State: {session.dataset_status}",
+        ]
+        if session.dataset_review_summary:
+            review = session.dataset_review_summary
+            lines.append(
+                f"Frames: {review['frame_count']} | L {review['left_presence_ratio']:.0%} | R {review['right_presence_ratio']:.0%}"
+            )
+        else:
+            lines.append("Review keys: [A] Accept  [X] Reject  [R] Re-record")
+
+        for line in lines:
+            draw.text((panel_x, panel_y), line, font=self.font_small,
+                      fill=self._bgr_to_rgb(config.COLOR_TEXT_SECONDARY))
+            panel_y += 16
+
     # ──────────────────────────────────────────────────────────────────
     #  Input Bar
     # ──────────────────────────────────────────────────────────────────
@@ -348,18 +406,19 @@ class UIRenderer:
         else:
             draw.text((24, self.input_y + 14), display_text, font=self.font_body, fill=(255, 255, 255))
             
-        # Draw Listen and Send buttons
-        # Listen button (left of Send)
-        listen_w = 80
-        listen_x1 = self.width - 100 - listen_w
-        listen_x2 = listen_x1 + listen_w
-        listen_y1 = self.input_y + 1
-        listen_y2 = self.status_y - 1
-        draw.rounded_rectangle([listen_x1, listen_y1, listen_x2, listen_y2], radius=6, fill=(40, 100, 160))
-        _, _, lw, lh = draw.textbbox((0, 0), "Listen", font=self.font_body_bold)
-        lx = listen_x1 + (listen_w - lw) // 2
+        # Draw Mic toggle and Send buttons
+        mic_w = 100
+        mic_x1 = self.width - 100 - 10 - mic_w
+        mic_x2 = mic_x1 + mic_w
+        mic_y1 = self.input_y + 1
+        mic_y2 = self.status_y - 1
+        mic_fill = (45, 140, 70) if session.mic_enabled else (90, 60, 60)
+        mic_text = "Mic On" if session.mic_enabled else "Mic Off"
+        draw.rounded_rectangle([mic_x1, mic_y1, mic_x2, mic_y2], radius=6, fill=mic_fill)
+        _, _, lw, lh = draw.textbbox((0, 0), mic_text, font=self.font_body_bold)
+        lx = mic_x1 + (mic_w - lw) // 2
         ly = self.input_y + 25 - lh // 2
-        draw.text((lx, ly), "Listen", font=self.font_body_bold, fill=(255, 255, 255))
+        draw.text((lx, ly), mic_text, font=self.font_body_bold, fill=(255, 255, 255))
 
         # Send button
         _, _, w, h = draw.textbbox((0, 0), "Send", font=self.font_body_bold)
@@ -377,6 +436,7 @@ class UIRenderer:
 
         # Mic state indicator
         mic_colors = {
+            "Mic Off": config.COLOR_TEXT_SECONDARY,
             "Listening": config.COLOR_WARNING,
             "Processing": config.COLOR_SUCCESS,
             "Error": (0, 0, 200),
@@ -393,8 +453,13 @@ class UIRenderer:
         cx += 110
 
         # Ready
-        draw.text((cx, ty), "System Ready",
+        ready_text = "Dataset Ready" if getattr(self, "_last_session_dataset_mode", False) else "System Ready"
+        draw.text((cx, ty), ready_text,
                   font=self.font_small, fill=self._bgr_to_rgb(config.COLOR_TEXT_PRIMARY))
+
+        if hasattr(self, "_last_session_dataset_mode") and self._last_session_dataset_mode:
+            draw.text((cx + 120, ty), f"Dataset: {self._last_session_dataset_label}",
+                      font=self.font_small, fill=self._bgr_to_rgb(config.COLOR_WARNING))
 
         # Dev Mode extras
         if config.DEV_MODE:
@@ -421,13 +486,13 @@ class UIRenderer:
     # ──────────────────────────────────────────────────────────────────
     def _draw_dev_landmarks(self, frame: cv2.Mat,
                             pixel_landmarks: List[Tuple[int, int]],
-                            cx: int, cy: int):
+                            cx: int, cy: int, color: Tuple[int, int, int]):
         scale_x = self.cam_w / config.FRAME_WIDTH
         scale_y = self.cam_h / config.FRAME_HEIGHT
         for pt in pixel_landmarks:
             px = cx + int(pt[0] * scale_x)
             py = cy + int(pt[1] * scale_y)
-            cv2.circle(frame, (px, py), 2, (255, 0, 255), -1)
+            cv2.circle(frame, (px, py), 2, color, -1)
 
     # ──────────────────────────────────────────────────────────────────
     #  Utility

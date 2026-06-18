@@ -1,5 +1,6 @@
 # Python standard ignores
 __pycache__/
+**/__pycache__/
 *.py[cod]
 *$py.class
 *.so
@@ -48,9 +49,16 @@ logs/
 
 # Application Specific / User Data
 exports/
+dataset/accepted/
+dataset/rejected/
+dataset/manifest.jsonl
+dataset/confirmed_signs_log.jsonl
+tts_cache/
+SAKSHAM-V1/
 drawings/
 whiteboard_*.png
 tests/*.png
+*.pyc
 
 # LLM Agent / System Generated
 .gemini/

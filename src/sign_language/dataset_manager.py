@@ -18,6 +18,8 @@ class DatasetManager:
     RECOMMENDED_FRAME_COUNT = 24
     MIN_ACTIVE_HAND_PRESENCE_RATIO = 0.60
     RECOMMENDED_ACTIVE_HAND_PRESENCE_RATIO = 0.85
+    MIN_CLIPS_PER_LABEL_TARGET = 40
+    MIN_SIGNERS_TARGET = 5
 
     def __init__(self, data_dir: str = "dataset", export_dir: str = "exports"):
         self.data_dir = data_dir
@@ -250,6 +252,294 @@ class DatasetManager:
                 if line:
                     entries.append(json.loads(line))
         return entries
+
+    @staticmethod
+    def _safe_mean(values: List[float]) -> float:
+        return float(sum(values) / len(values)) if values else 0.0
+
+    def get_collection_targets(self, expected_labels: Optional[List[str]] = None) -> Dict:
+        labels = [label.upper() for label in (expected_labels or [])]
+        label_count = len(labels)
+        return {
+            "minimum_clips_per_sign": self.MIN_CLIPS_PER_LABEL_TARGET,
+            "minimum_signers": self.MIN_SIGNERS_TARGET,
+            "target_dataset_size": label_count * self.MIN_CLIPS_PER_LABEL_TARGET if label_count else 0,
+            "expected_label_count": label_count,
+            "expected_labels": labels,
+        }
+
+    def get_dataset_statistics(self, expected_labels: Optional[List[str]] = None) -> Dict:
+        records = self._load_manifest_entries()
+        labels = [label.upper() for label in (expected_labels or [])]
+        clips_per_label: Dict[str, int] = {label: 0 for label in labels}
+        clips_per_signer: Dict[str, int] = {}
+        signers_per_label: Dict[str, set] = {label: set() for label in labels}
+
+        frame_counts: List[float] = []
+        left_ratios: List[float] = []
+        right_ratios: List[float] = []
+        active_ratios: List[float] = []
+        both_ratios: List[float] = []
+
+        for record in records:
+            label = record.get("label", "").upper()
+            signer_id = record.get("signer_id", "")
+            clips_per_label[label] = clips_per_label.get(label, 0) + 1
+            clips_per_signer[signer_id] = clips_per_signer.get(signer_id, 0) + 1
+            signers_per_label.setdefault(label, set()).add(signer_id)
+
+            frame_counts.append(float(record.get("frame_count", 0)))
+            left_ratios.append(float(record.get("left_presence_ratio", 0.0)))
+            right_ratios.append(float(record.get("right_presence_ratio", 0.0)))
+            active_ratios.append(float(record.get("active_hand_ratio", 0.0)))
+            both_ratios.append(float(record.get("both_hands_ratio", 0.0)))
+
+        nonzero_label_counts = {label: count for label, count in clips_per_label.items() if count > 0}
+        missing_labels = [label for label in labels if clips_per_label.get(label, 0) == 0]
+        under_target_labels = [
+            label for label, count in clips_per_label.items()
+            if count < self.MIN_CLIPS_PER_LABEL_TARGET
+        ]
+        signer_counts_per_label = {
+            label: len(signers) for label, signers in signers_per_label.items()
+        }
+        labels_below_signer_target = [
+            label for label, signer_count in signer_counts_per_label.items()
+            if label in clips_per_label and clips_per_label.get(label, 0) > 0 and signer_count < self.MIN_SIGNERS_TARGET
+        ]
+
+        min_count = min(nonzero_label_counts.values()) if nonzero_label_counts else 0
+        max_count = max(nonzero_label_counts.values()) if nonzero_label_counts else 0
+        min_label = min(nonzero_label_counts, key=nonzero_label_counts.get) if nonzero_label_counts else ""
+        max_label = max(nonzero_label_counts, key=nonzero_label_counts.get) if nonzero_label_counts else ""
+        targets = self.get_collection_targets(labels)
+        target_dataset_size = targets["target_dataset_size"]
+        overall_progress = (
+            min(len(records) / target_dataset_size, 1.0) if target_dataset_size else 0.0
+        )
+
+        return {
+            "total_clips": len(records),
+            "clips_per_label": dict(sorted(clips_per_label.items())),
+            "clips_per_signer": dict(sorted(clips_per_signer.items())),
+            "signers_per_label": dict(sorted(
+                (label, len(signers)) for label, signers in signers_per_label.items()
+            )),
+            "label_signer_coverage": dict(sorted(
+                (label, sorted(signers)) for label, signers in signers_per_label.items()
+            )),
+            "unique_signer_count": len(clips_per_signer),
+            "average_frame_count": self._safe_mean(frame_counts),
+            "min_frame_count": int(min(frame_counts)) if frame_counts else 0,
+            "max_frame_count": int(max(frame_counts)) if frame_counts else 0,
+            "hand_visibility_metrics": {
+                "left_presence_avg": self._safe_mean(left_ratios),
+                "right_presence_avg": self._safe_mean(right_ratios),
+                "active_hand_avg": self._safe_mean(active_ratios),
+                "both_hands_avg": self._safe_mean(both_ratios),
+            },
+            "class_balance": {
+                "min_count": min_count,
+                "max_count": max_count,
+                "min_label": min_label,
+                "max_label": max_label,
+                "imbalance_ratio": (max_count / min_count) if min_count else 0.0,
+                "missing_labels": missing_labels,
+                "under_target_labels": sorted(under_target_labels),
+                "labels_below_signer_target": sorted(labels_below_signer_target),
+            },
+            "targets": targets,
+            "progress": {
+                "clips_progress_ratio": overall_progress,
+                "clips_remaining": max(target_dataset_size - len(records), 0),
+                "signers_progress_ratio": min(
+                    len(clips_per_signer) / self.MIN_SIGNERS_TARGET, 1.0
+                ) if self.MIN_SIGNERS_TARGET else 0.0,
+            },
+        }
+
+    def audit_dataset_quality(self, expected_labels: Optional[List[str]] = None) -> Dict:
+        records = self._load_manifest_entries()
+        issues = []
+        verified_samples = 0
+        samples_with_warnings = 0
+        samples_with_blockers = 0
+        samples_with_both_hands = 0
+
+        for record in records:
+            sample_id = record.get("sample_id", "")
+            npz_path = os.path.join(self.accepted_dir, f"{sample_id}.npz")
+            metadata_path = os.path.join(self.accepted_dir, f"{sample_id}.json")
+            sample_issue = {"sample_id": sample_id, "issues": []}
+
+            if not os.path.exists(npz_path):
+                sample_issue["issues"].append("Missing .npz data file.")
+            if not os.path.exists(metadata_path):
+                sample_issue["issues"].append("Missing metadata .json file.")
+
+            if record.get("quality_warnings"):
+                samples_with_warnings += 1
+            if record.get("quality_blockers"):
+                samples_with_blockers += 1
+            if float(record.get("both_hands_ratio", 0.0)) > 0.0:
+                samples_with_both_hands += 1
+
+            if os.path.exists(npz_path):
+                try:
+                    with np.load(npz_path) as sample:
+                        required_keys = {
+                            "timestamps",
+                            "left_hand",
+                            "right_hand",
+                            "left_present",
+                            "right_present",
+                            "left_confidence",
+                            "right_confidence",
+                        }
+                        missing_keys = sorted(required_keys.difference(sample.files))
+                        if missing_keys:
+                            sample_issue["issues"].append(
+                                f"Missing arrays: {', '.join(missing_keys)}."
+                            )
+                        else:
+                            frame_count = int(record.get("frame_count", 0))
+                            if sample["timestamps"].shape[0] != frame_count:
+                                sample_issue["issues"].append(
+                                    f"Frame count mismatch: manifest={frame_count}, npz={sample['timestamps'].shape[0]}."
+                                )
+                            if sample["left_hand"].shape != sample["right_hand"].shape:
+                                sample_issue["issues"].append("Left/right hand array shapes do not match.")
+                            if len(sample["left_hand"].shape) != 3 or sample["left_hand"].shape[1:] != (21, 3):
+                                sample_issue["issues"].append("Hand landmark arrays do not match [frames, 21, 3].")
+                            if sample["left_present"].shape[0] != sample["timestamps"].shape[0]:
+                                sample_issue["issues"].append("Left presence array length mismatch.")
+                            if sample["right_present"].shape[0] != sample["timestamps"].shape[0]:
+                                sample_issue["issues"].append("Right presence array length mismatch.")
+                except Exception as exc:
+                    sample_issue["issues"].append(f"Failed to read .npz: {exc}")
+
+            if sample_issue["issues"]:
+                issues.append(sample_issue)
+            else:
+                verified_samples += 1
+
+        statistics = self.get_dataset_statistics(expected_labels)
+        return {
+            "total_samples": len(records),
+            "verified_samples": verified_samples,
+            "samples_with_warnings": samples_with_warnings,
+            "samples_with_blockers": samples_with_blockers,
+            "samples_with_both_hands": samples_with_both_hands,
+            "issues": issues,
+            "statistics": statistics,
+            "ready_for_training": (
+                len(records) > 0
+                and verified_samples == len(records)
+                and not statistics["class_balance"]["missing_labels"]
+                and statistics["unique_signer_count"] >= self.MIN_SIGNERS_TARGET
+                and statistics["total_clips"] >= statistics["targets"]["target_dataset_size"]
+            ),
+        }
+
+    def verify_two_hand_capture(self) -> Dict:
+        records = self._load_manifest_entries()
+        verification = {
+            "accepted_samples": len(records),
+            "storage_fields_verified": [
+                "left_hand",
+                "right_hand",
+                "left_present",
+                "right_present",
+                "left_confidence",
+                "right_confidence",
+            ],
+            "samples_with_left_hand": 0,
+            "samples_with_right_hand": 0,
+            "samples_with_both_hands": 0,
+            "verified_sample_id": "",
+            "two_hand_capture_verified": False,
+            "message": "",
+        }
+
+        for record in records:
+            sample_id = record.get("sample_id", "")
+            npz_path = os.path.join(self.accepted_dir, f"{sample_id}.npz")
+            if not os.path.exists(npz_path):
+                continue
+            with np.load(npz_path) as sample:
+                left_present = sample["left_present"]
+                right_present = sample["right_present"]
+                if float(np.max(left_present)) > 0.0:
+                    verification["samples_with_left_hand"] += 1
+                if float(np.max(right_present)) > 0.0:
+                    verification["samples_with_right_hand"] += 1
+                if bool(np.any((left_present > 0.0) & (right_present > 0.0))):
+                    verification["samples_with_both_hands"] += 1
+                    if not verification["verified_sample_id"]:
+                        verification["verified_sample_id"] = sample_id
+                        verification["two_hand_capture_verified"] = True
+
+        if verification["two_hand_capture_verified"]:
+            verification["message"] = (
+                f"Verified two-hand capture in accepted sample {verification['verified_sample_id']}."
+            )
+        elif records:
+            verification["message"] = (
+                "Accepted samples exist, but no stored clip currently contains both hands in the same frame."
+            )
+        else:
+            verification["message"] = "No accepted samples available yet to verify two-hand capture."
+
+        return verification
+
+    def get_live_recording_feedback(self) -> Optional[Dict]:
+        if not self.is_recording:
+            return None
+
+        summary = self._summarize_frames(self.current_sequence)
+        frames_remaining = max(self.MIN_FRAME_COUNT - summary["frame_count"], 0)
+        recommended_frames_remaining = max(self.RECOMMENDED_FRAME_COUNT - summary["frame_count"], 0)
+        last_frame = self.current_sequence[-1] if self.current_sequence else {}
+        left_visible = bool(last_frame.get("left_hand", {}).get("present"))
+        right_visible = bool(last_frame.get("right_hand", {}).get("present"))
+
+        if frames_remaining > 0:
+            feedback = f"Collect {frames_remaining} more frames to meet the minimum clip length."
+            quality_state = "needs_frames"
+        elif summary["active_hand_ratio"] < self.MIN_ACTIVE_HAND_PRESENCE_RATIO:
+            feedback = "Tracking is weak. Keep the active hand clearly visible in the camera."
+            quality_state = "blocked"
+        elif summary["quality_warnings"]:
+            feedback = summary["quality_warnings"][0]
+            quality_state = "warning"
+        elif recommended_frames_remaining > 0:
+            feedback = f"Quality looks acceptable. {recommended_frames_remaining} more frames would strengthen the clip."
+            quality_state = "good"
+        else:
+            feedback = "Quality looks strong. This clip is ready for review when you stop recording."
+            quality_state = "excellent"
+
+        summary.update({
+            "left_visible_now": left_visible,
+            "right_visible_now": right_visible,
+            "hands_visible_now": int(left_visible) + int(right_visible),
+            "feedback": feedback,
+            "quality_state": quality_state,
+            "frames_remaining_to_minimum": frames_remaining,
+            "frames_remaining_to_recommended": recommended_frames_remaining,
+        })
+        return summary
+
+    def build_collection_report(self, expected_labels: Optional[List[str]] = None) -> Dict:
+        statistics = self.get_dataset_statistics(expected_labels)
+        audit = self.audit_dataset_quality(expected_labels)
+        two_hand = self.verify_two_hand_capture()
+        return {
+            "statistics": statistics,
+            "audit": audit,
+            "two_hand_verification": two_hand,
+            "targets": statistics["targets"],
+        }
 
     def export_dataset(self, format: str = "both") -> List[str]:
         """Exports accepted dataset metadata to disk and returns the created file paths."""

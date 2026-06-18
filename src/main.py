@@ -112,6 +112,13 @@ def main():
         tts_engine.speak(spoken_phrase)
 
     sl_engine = SignLanguageEngine(on_sign_recognized=on_sign_recognized)
+
+    def refresh_dataset_insights():
+        session.set_dataset_insights(
+            sl_engine.dataset_manager.build_collection_report(session.dataset_labels)
+        )
+
+    refresh_dataset_insights()
     
     # ── Speech-to-Text Engine ──
     def on_speech_text(text: str):
@@ -156,11 +163,13 @@ def main():
         sl_engine.start_recording(session.current_dataset_label, session.current_signer_id)
         session.set_dataset_status("Recording")
         session.set_dataset_review_summary(None)
+        session.set_dataset_live_feedback(sl_engine.dataset_manager.get_live_recording_feedback())
         session.set_toast(f"Recording {session.current_dataset_label} for {session.current_signer_id}")
 
     def stop_dataset_recording():
         review = sl_engine.stop_recording()
         session.set_dataset_review_summary(review)
+        session.set_dataset_live_feedback(None)
         session.set_dataset_status("Review" if review else "Idle")
         if review:
             if not review["passes_quality_checks"]:
@@ -181,9 +190,10 @@ def main():
             session.set_dataset_status("Review")
             session.set_toast(blocker_text, duration=4.0)
             return
-        session.mark_dataset_clip_saved(saved["label"])
         session.set_dataset_review_summary(None)
+        session.set_dataset_live_feedback(None)
         session.set_dataset_status("Idle")
+        refresh_dataset_insights()
         session.set_toast(f"Saved clip: {saved['label']} ({saved['frame_count']} frames)")
 
     def reject_dataset_clip(reason: str = "Rejected"):
@@ -191,6 +201,7 @@ def main():
         if not rejected:
             return
         session.set_dataset_review_summary(None)
+        session.set_dataset_live_feedback(None)
         session.set_dataset_status("Idle")
         session.set_toast(f"Clip discarded: {rejected['label']}")
 
@@ -207,6 +218,7 @@ def main():
         session.set_dataset_mode(True)
         session.set_dataset_status("Idle")
         session.set_dataset_review_summary(None)
+        refresh_dataset_insights()
 
     def export_dataset_summary():
         exported_files = sl_engine.export_dataset("both")
@@ -217,6 +229,7 @@ def main():
 
         export_base = exported_files[0].rsplit(".", 1)[0]
         session.set_dataset_export_result(export_base, True)
+        refresh_dataset_insights()
         session.set_toast(f"Dataset exported: {len(exported_files)} files", duration=4.0)
 
     main_fps = 0.0
@@ -248,6 +261,11 @@ def main():
 
             # ── 2. Sign Language Tracking & Recognition ──
             hand_detected, hand_data = sl_engine.process_frame(frame)
+            session.set_live_hand_visibility(hand_data if hand_detected else None)
+            if session.dataset_mode and sl_engine.dataset_manager.is_recording:
+                session.set_dataset_live_feedback(sl_engine.dataset_manager.get_live_recording_feedback())
+            elif not sl_engine.has_review_clip():
+                session.set_dataset_live_feedback(None)
 
             # ── 3. Render UI ─────────────────────────────────────────
             annotated_frame = ui.render(

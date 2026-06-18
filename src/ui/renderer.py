@@ -315,15 +315,52 @@ class UIRenderer:
                 f"Signer: {session.current_signer_id}",
                 f"Status: {session.dataset_status}",
             ]
+            live_visibility = getattr(session, "live_hand_visibility", {})
+            info_lines.append(
+                "Live Visibility: "
+                f"L {'ON' if live_visibility.get('left_visible') else 'OFF'} | "
+                f"R {'ON' if live_visibility.get('right_visible') else 'OFF'} | "
+                f"Hands {live_visibility.get('hands_present', 0)}"
+            )
+
+            live_feedback = getattr(session, "dataset_live_feedback", None)
+            if live_feedback:
+                info_lines.append(
+                    f"Recording: {live_feedback['frame_count']} frames | "
+                    f"Active {live_feedback['active_hand_ratio']:.0%} | "
+                    f"Both {live_feedback['both_hands_ratio']:.0%}"
+                )
+                info_lines.append(f"Feedback: {live_feedback['feedback']}")
+
+            statistics = getattr(session, "dataset_insights", {}).get("statistics", {})
+            targets = statistics.get("targets", {})
+            progress = statistics.get("progress", {})
+            if statistics:
+                info_lines.append(
+                    f"Progress: {statistics.get('total_clips', 0)}/{targets.get('target_dataset_size', 0)} clips | "
+                    f"{statistics.get('unique_signer_count', 0)}/{targets.get('minimum_signers', 0)} signers"
+                )
+                info_lines.append(
+                    "Visibility Avg: "
+                    f"Active {statistics.get('hand_visibility_metrics', {}).get('active_hand_avg', 0.0):.0%} | "
+                    f"Both {statistics.get('hand_visibility_metrics', {}).get('both_hands_avg', 0.0):.0%} | "
+                    f"Progress {progress.get('clips_progress_ratio', 0.0):.0%}"
+                )
             if session.dataset_review_summary:
                 info_lines.append("Review: [A] Accept  [X] Reject  [R] Re-record")
             else:
                 info_lines.append("Controls: [J/L] Label  [U/I] Signer  [R] Start/Stop  [E] Export")
 
             for line in info_lines:
-                draw.text((px, py), line, font=self.font_small,
-                          fill=self._bgr_to_rgb(config.COLOR_TEXT_SECONDARY))
-                py += 18
+                py = self._draw_wrapped_line(
+                    draw,
+                    line,
+                    px,
+                    py,
+                    self.live_panel_w - (px * 2),
+                    self.font_small,
+                    self._bgr_to_rgb(config.COLOR_TEXT_SECONDARY),
+                )
 
     # ──────────────────────────────────────────────────────────────────
     #  Session Info panel  (bottom-right, below camera)
@@ -379,6 +416,15 @@ class UIRenderer:
                   fill=self._bgr_to_rgb(config.COLOR_TEXT_PRIMARY))
         panel_y += 18
 
+        insights = getattr(session, "dataset_insights", {})
+        statistics = insights.get("statistics", {})
+        audit = insights.get("audit", {})
+        two_hand = insights.get("two_hand_verification", {})
+        visibility_metrics = statistics.get("hand_visibility_metrics", {})
+        class_balance = statistics.get("class_balance", {})
+        targets = statistics.get("targets", {})
+        progress = statistics.get("progress", {})
+
         lines = [
             f"Label: {session.current_dataset_label}  ({session.get_dataset_clip_count(session.current_dataset_label)} saved)",
             f"Signer: {session.current_signer_id}",
@@ -403,13 +449,65 @@ class UIRenderer:
         else:
             lines.append("Review keys: [A] Accept  [X] Reject  [R] Re-record  [E] Export")
 
+        if statistics:
+            lines.extend([
+                (
+                    f"Dataset Stats: {statistics.get('total_clips', 0)}/{targets.get('target_dataset_size', 0)} clips | "
+                    f"{statistics.get('unique_signer_count', 0)}/{targets.get('minimum_signers', 0)} signers"
+                ),
+                (
+                    f"Frames Avg: {statistics.get('average_frame_count', 0.0):.1f} | "
+                    f"Active Avg: {visibility_metrics.get('active_hand_avg', 0.0):.0%} | "
+                    f"Both Avg: {visibility_metrics.get('both_hands_avg', 0.0):.0%}"
+                ),
+                (
+                    f"Class Balance: min {class_balance.get('min_label') or '-'}={class_balance.get('min_count', 0)} | "
+                    f"max {class_balance.get('max_label') or '-'}={class_balance.get('max_count', 0)} | "
+                    f"ratio {class_balance.get('imbalance_ratio', 0.0):.2f}x"
+                ),
+                (
+                    "Per Label: "
+                    + ", ".join(
+                        f"{label}:{count}"
+                        for label, count in statistics.get("clips_per_label", {}).items()
+                    )
+                ),
+                (
+                    "Per Signer: "
+                    + ", ".join(
+                        f"{signer}:{count}"
+                        for signer, count in statistics.get("clips_per_signer", {}).items()
+                    ) if statistics.get("clips_per_signer") else "Per Signer: none yet"
+                ),
+                (
+                    f"Quality Audit: {audit.get('verified_samples', 0)}/{audit.get('total_samples', 0)} verified | "
+                    f"Warnings {audit.get('samples_with_warnings', 0)} | "
+                    f"Issues {len(audit.get('issues', []))}"
+                ),
+                (
+                    f"Two-Hand: {'VERIFIED' if two_hand.get('two_hand_capture_verified') else 'PENDING'} | "
+                    f"Both-hand clips {two_hand.get('samples_with_both_hands', 0)}"
+                ),
+                (
+                    f"Progress Remaining: {progress.get('clips_remaining', 0)} clips | "
+                    f"Missing labels {len(class_balance.get('missing_labels', []))}"
+                ),
+            ])
+
         if session.last_dataset_export_status == "Success" and session.last_dataset_export_path:
             lines.append(f"Exported: {os.path.basename(session.last_dataset_export_path)}")
 
+        panel_width = self.width - panel_x - 24
         for line in lines:
-            draw.text((panel_x, panel_y), line, font=self.font_small,
-                      fill=self._bgr_to_rgb(config.COLOR_TEXT_SECONDARY))
-            panel_y += 16
+            panel_y = self._draw_wrapped_line(
+                draw,
+                line,
+                panel_x,
+                panel_y,
+                panel_width,
+                self.font_small,
+                self._bgr_to_rgb(config.COLOR_TEXT_SECONDARY),
+            )
 
     # ──────────────────────────────────────────────────────────────────
     #  Input Bar
@@ -522,3 +620,20 @@ class UIRenderer:
     def _bgr_to_rgb(bgr_tuple: tuple) -> tuple:
         """Convert a BGR colour (used in config) to RGB for PIL."""
         return bgr_tuple[::-1]
+
+    def _draw_wrapped_line(self,
+                           draw: ImageDraw.ImageDraw,
+                           text: str,
+                           x: int,
+                           y: int,
+                           max_width: int,
+                           font: ImageFont.ImageFont,
+                           fill: tuple,
+                           line_gap: int = 2) -> int:
+        chars_per_line = max(18, int(max_width / 7))
+        wrapped_lines = textwrap.wrap(text, width=chars_per_line) or [text]
+        for line in wrapped_lines:
+            draw.text((x, y), line, font=font, fill=fill)
+            _, _, _, height = draw.textbbox((0, 0), line, font=font)
+            y += height + line_gap
+        return y

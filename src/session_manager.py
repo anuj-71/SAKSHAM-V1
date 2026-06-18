@@ -52,6 +52,13 @@ class ConversationSession:
         self.dataset_status = "Idle"
         self.dataset_review_summary: Optional[Dict] = None
         self.dataset_clip_counts: Dict[str, int] = {}
+        self.dataset_insights: Dict = {}
+        self.dataset_live_feedback: Optional[Dict] = None
+        self.live_hand_visibility = {
+            "left_visible": False,
+            "right_visible": False,
+            "hands_present": 0,
+        }
         
         # Ensure export directory exists
         os.makedirs("exports", exist_ok=True)
@@ -125,6 +132,7 @@ class ConversationSession:
         self.dataset_mode = enabled
         self.dataset_status = "Idle"
         self.dataset_review_summary = None
+        self.dataset_live_feedback = None
         mode = "ON" if enabled else "OFF"
         self.set_toast(f"Dataset Mode: {mode}")
 
@@ -134,11 +142,37 @@ class ConversationSession:
     def set_dataset_review_summary(self, summary: Optional[Dict]):
         self.dataset_review_summary = summary
 
+    def set_dataset_insights(self, insights: Dict):
+        self.dataset_insights = insights or {}
+        statistics = self.dataset_insights.get("statistics", {})
+        self.dataset_clip_counts = dict(statistics.get("clips_per_label", {}))
+
+    def set_dataset_live_feedback(self, feedback: Optional[Dict]):
+        self.dataset_live_feedback = feedback
+
+    def set_live_hand_visibility(self, hand_data: Optional[Dict]):
+        if not hand_data:
+            self.live_hand_visibility = {
+                "left_visible": False,
+                "right_visible": False,
+                "hands_present": 0,
+            }
+            return
+
+        left_visible = bool(hand_data.get("left_hand", {}).get("present"))
+        right_visible = bool(hand_data.get("right_hand", {}).get("present"))
+        self.live_hand_visibility = {
+            "left_visible": left_visible,
+            "right_visible": right_visible,
+            "hands_present": int(left_visible) + int(right_visible),
+        }
+
     def mark_dataset_clip_saved(self, label: str):
         self.dataset_clip_counts[label] = self.dataset_clip_counts.get(label, 0) + 1
 
     def get_dataset_clip_count(self, label: str) -> int:
-        return self.dataset_clip_counts.get(label, 0)
+        statistics = self.dataset_insights.get("statistics", {})
+        return statistics.get("clips_per_label", {}).get(label, self.dataset_clip_counts.get(label, 0))
 
     def set_dataset_export_result(self, export_base: str, success: bool):
         self.last_dataset_export_path = export_base

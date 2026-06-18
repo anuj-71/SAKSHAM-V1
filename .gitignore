@@ -53,6 +53,8 @@ dataset/accepted/
 dataset/rejected/
 dataset/manifest.jsonl
 dataset/confirmed_signs_log.jsonl
+dataset/dataset_export_*.json
+dataset/dataset_export_*.csv
 tts_cache/
 SAKSHAM-V1/
 drawings/

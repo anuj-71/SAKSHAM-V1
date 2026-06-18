@@ -36,6 +36,8 @@ class ConversationSession:
         self.toast_expiry: float = 0.0
         self.last_export_path = ""
         self.last_export_status = ""  # "", "Success", "Failed"
+        self.last_dataset_export_path = ""
+        self.last_dataset_export_status = ""  # "", "Success", "Failed"
         self.typing_buffer = ""
         self.is_typing_focused = False
         self.request_mic_toggle = False
@@ -137,6 +139,10 @@ class ConversationSession:
 
     def get_dataset_clip_count(self, label: str) -> int:
         return self.dataset_clip_counts.get(label, 0)
+
+    def set_dataset_export_result(self, export_base: str, success: bool):
+        self.last_dataset_export_path = export_base
+        self.last_dataset_export_status = "Success" if success else "Failed"
 
     def export(self) -> bool:
         """Exports the conversation to TXT and JSON in the exports/ directory."""

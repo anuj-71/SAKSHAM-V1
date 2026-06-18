@@ -3,6 +3,7 @@ import csv
 import json
 import time
 import logging
+from datetime import datetime
 from typing import List, Dict, Optional
 import numpy as np
 
@@ -13,10 +14,17 @@ class DatasetManager:
     Manages the collection, storage, and export of sign language dataset sequences.
     Records temporal sequences of hand landmarks for future dynamic sign language model training.
     """
-    def __init__(self, data_dir: str = "dataset"):
+    MIN_FRAME_COUNT = 15
+    RECOMMENDED_FRAME_COUNT = 24
+    MIN_ACTIVE_HAND_PRESENCE_RATIO = 0.60
+    RECOMMENDED_ACTIVE_HAND_PRESENCE_RATIO = 0.85
+
+    def __init__(self, data_dir: str = "dataset", export_dir: str = "exports"):
         self.data_dir = data_dir
         if not os.path.exists(self.data_dir):
             os.makedirs(self.data_dir)
+        self.export_dir = export_dir
+        os.makedirs(self.export_dir, exist_ok=True)
 
         self.accepted_dir = os.path.join(self.data_dir, "accepted")
         self.rejected_dir = os.path.join(self.data_dir, "rejected")
@@ -89,7 +97,7 @@ class DatasetManager:
                 "sequence_id": self.current_sequence_id,
                 "label": self.current_label,
                 "signer_id": self.current_signer_id,
-                "frames": self.current_sequence
+                "frames": self.current_sequence,
             }
             self.review_clip = review_clip
             logging.info(f"DatasetManager: Stopped recording. Sequence '{self.current_sequence_id}' has {len(self.current_sequence)} frames.")
@@ -101,22 +109,59 @@ class DatasetManager:
     def has_review_clip(self) -> bool:
         return self.review_clip is not None
 
+    def _summarize_frames(self, frames: List[Dict]) -> Dict:
+        frame_count = len(frames)
+        left_present = sum(1 for frame in frames if frame["left_hand"]["present"])
+        right_present = sum(1 for frame in frames if frame["right_hand"]["present"])
+        both_hands_present = sum(
+            1 for frame in frames if frame["left_hand"]["present"] and frame["right_hand"]["present"]
+        )
+        left_presence_ratio = (left_present / frame_count) if frame_count else 0.0
+        right_presence_ratio = (right_present / frame_count) if frame_count else 0.0
+        active_hand_ratio = max(left_presence_ratio, right_presence_ratio)
+        both_hands_ratio = (both_hands_present / frame_count) if frame_count else 0.0
+
+        blocking_issues = []
+        warnings = []
+        if frame_count < self.MIN_FRAME_COUNT:
+            blocking_issues.append(
+                f"Need at least {self.MIN_FRAME_COUNT} frames; recorded {frame_count}."
+            )
+        elif frame_count < self.RECOMMENDED_FRAME_COUNT:
+            warnings.append(
+                f"Short clip: {frame_count} frames. Recommended at least {self.RECOMMENDED_FRAME_COUNT}."
+            )
+
+        if active_hand_ratio < self.MIN_ACTIVE_HAND_PRESENCE_RATIO:
+            blocking_issues.append(
+                f"Low hand visibility: best hand tracked in {active_hand_ratio:.0%} of frames; minimum is {self.MIN_ACTIVE_HAND_PRESENCE_RATIO:.0%}."
+            )
+        elif active_hand_ratio < self.RECOMMENDED_ACTIVE_HAND_PRESENCE_RATIO:
+            warnings.append(
+                f"Hand visibility is only {active_hand_ratio:.0%}. Recommended at least {self.RECOMMENDED_ACTIVE_HAND_PRESENCE_RATIO:.0%}."
+            )
+
+        return {
+            "frame_count": frame_count,
+            "left_presence_ratio": left_presence_ratio,
+            "right_presence_ratio": right_presence_ratio,
+            "active_hand_ratio": active_hand_ratio,
+            "both_hands_ratio": both_hands_ratio,
+            "quality_blockers": blocking_issues,
+            "quality_warnings": warnings,
+            "passes_quality_checks": len(blocking_issues) == 0,
+        }
+
     def get_review_summary(self) -> Optional[Dict]:
         if not self.review_clip:
             return None
 
-        frames = self.review_clip["frames"]
-        frame_count = len(frames)
-        left_present = sum(1 for frame in frames if frame["left_hand"]["present"])
-        right_present = sum(1 for frame in frames if frame["right_hand"]["present"])
         summary = {
             "sequence_id": self.review_clip["sequence_id"],
             "label": self.review_clip["label"],
             "signer_id": self.review_clip["signer_id"],
-            "frame_count": frame_count,
-            "left_presence_ratio": (left_present / frame_count) if frame_count else 0.0,
-            "right_presence_ratio": (right_present / frame_count) if frame_count else 0.0,
         }
+        summary.update(self._summarize_frames(self.review_clip["frames"]))
         return summary
 
     def _save_clip_metadata(self, target_dir: str, metadata: Dict):
@@ -143,23 +188,38 @@ class DatasetManager:
             right_confidence=right_confidence,
         )
 
+    def _build_metadata(self, summary: Dict, status: str, reason: Optional[str] = None) -> Dict:
+        metadata = {
+            "sample_id": summary["sequence_id"],
+            "label": summary["label"],
+            "signer_id": summary["signer_id"],
+            "frame_count": summary["frame_count"],
+            "left_presence_ratio": summary["left_presence_ratio"],
+            "right_presence_ratio": summary["right_presence_ratio"],
+            "active_hand_ratio": summary["active_hand_ratio"],
+            "both_hands_ratio": summary["both_hands_ratio"],
+            "quality_warnings": summary["quality_warnings"],
+            "quality_blockers": summary["quality_blockers"],
+            "passes_quality_checks": summary["passes_quality_checks"],
+            "saved_at": time.time(),
+            "status": status,
+        }
+        if reason:
+            metadata["reason"] = reason
+        return metadata
+
     def accept_current_clip(self) -> Optional[Dict]:
         if not self.review_clip:
             return None
 
         summary = self.get_review_summary()
-        sample_id = self.review_clip["sequence_id"]
-        metadata = {
-            "sample_id": sample_id,
-            "label": self.review_clip["label"],
-            "signer_id": self.review_clip["signer_id"],
-            "frame_count": summary["frame_count"],
-            "left_presence_ratio": summary["left_presence_ratio"],
-            "right_presence_ratio": summary["right_presence_ratio"],
-            "saved_at": time.time(),
-            "status": "accepted",
-        }
+        if not summary["passes_quality_checks"]:
+            blocked = self._build_metadata(summary, status="blocked")
+            blocked["message"] = "Clip does not meet dataset quality thresholds."
+            return blocked
 
+        sample_id = self.review_clip["sequence_id"]
+        metadata = self._build_metadata(summary, status="accepted")
         self._save_clip_arrays(self.accepted_dir, sample_id, self.review_clip["frames"])
         self._save_clip_metadata(self.accepted_dir, metadata)
         with open(self.manifest_path, "a", encoding="utf-8") as f:
@@ -174,38 +234,51 @@ class DatasetManager:
             return None
 
         summary = self.get_review_summary()
-        sample_id = self.review_clip["sequence_id"]
-        metadata = {
-            "sample_id": sample_id,
-            "label": self.review_clip["label"],
-            "signer_id": self.review_clip["signer_id"],
-            "frame_count": summary["frame_count"],
-            "left_presence_ratio": summary["left_presence_ratio"],
-            "right_presence_ratio": summary["right_presence_ratio"],
-            "saved_at": time.time(),
-            "status": "rejected",
-            "reason": reason,
-        }
+        metadata = self._build_metadata(summary, status="rejected", reason=reason)
         self._save_clip_metadata(self.rejected_dir, metadata)
         self.review_clip = None
         return metadata
 
-    def export_dataset(self, format: str = "json"):
-        """Exports all recorded sequences in the session to disk."""
-        if not self.session_sequences:
-            logging.info("DatasetManager: No sequences to export.")
-            return
-            
-        timestamp = int(time.time())
-        if format == "json":
-            file_path = os.path.join(self.data_dir, f"dataset_export_{timestamp}.json")
-            with open(file_path, "w") as f:
-                json.dump(self.session_sequences, f, indent=4)
-            logging.info(f"DatasetManager: Exported {len(self.session_sequences)} sequences to {file_path}")
-            
-        elif format == "csv":
-            file_path = os.path.join(self.data_dir, f"dataset_export_{timestamp}.csv")
-            with open(file_path, "w", newline='') as f:
+    def _load_manifest_entries(self) -> List[Dict]:
+        if not os.path.exists(self.manifest_path):
+            return []
+
+        entries = []
+        with open(self.manifest_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    entries.append(json.loads(line))
+        return entries
+
+    def export_dataset(self, format: str = "both") -> List[str]:
+        """Exports accepted dataset metadata to disk and returns the created file paths."""
+        manifest_entries = self._load_manifest_entries()
+        records = manifest_entries if manifest_entries else list(self.session_sequences)
+        if not records:
+            logging.info("DatasetManager: No accepted sequences to export.")
+            return []
+
+        export_formats = ("json", "csv") if format == "both" else (format,)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        export_base = os.path.join(self.export_dir, f"dataset_export_{timestamp}")
+        created_files: List[str] = []
+
+        if "json" in export_formats:
+            json_path = f"{export_base}.json"
+            payload = {
+                "generated_at": datetime.now().isoformat(),
+                "sample_count": len(records),
+                "source": "manifest" if manifest_entries else "session",
+                "samples": records,
+            }
+            with open(json_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=4)
+            created_files.append(json_path)
+
+        if "csv" in export_formats:
+            csv_path = f"{export_base}.csv"
+            with open(csv_path, "w", newline="", encoding="utf-8") as f:
                 writer = csv.writer(f)
                 header = [
                     "sample_id",
@@ -214,18 +287,29 @@ class DatasetManager:
                     "frame_count",
                     "left_presence_ratio",
                     "right_presence_ratio",
+                    "active_hand_ratio",
+                    "both_hands_ratio",
                     "status",
+                    "passes_quality_checks",
+                    "quality_warnings",
                 ]
                 writer.writerow(header)
-                
-                for seq in self.session_sequences:
+
+                for seq in records:
                     writer.writerow([
-                        seq["sample_id"],
-                        seq["label"],
-                        seq["signer_id"],
-                        seq["frame_count"],
-                        seq["left_presence_ratio"],
-                        seq["right_presence_ratio"],
-                        seq["status"],
+                        seq.get("sample_id", ""),
+                        seq.get("label", ""),
+                        seq.get("signer_id", ""),
+                        seq.get("frame_count", 0),
+                        seq.get("left_presence_ratio", 0.0),
+                        seq.get("right_presence_ratio", 0.0),
+                        seq.get("active_hand_ratio", 0.0),
+                        seq.get("both_hands_ratio", 0.0),
+                        seq.get("status", ""),
+                        seq.get("passes_quality_checks", True),
+                        " | ".join(seq.get("quality_warnings", [])),
                     ])
-            logging.info(f"DatasetManager: Exported {len(self.session_sequences)} sequences to {file_path}")
+            created_files.append(csv_path)
+
+        logging.info(f"DatasetManager: Exported {len(records)} accepted sequences to {', '.join(created_files)}")
+        return created_files

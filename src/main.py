@@ -163,11 +163,23 @@ def main():
         session.set_dataset_review_summary(review)
         session.set_dataset_status("Review" if review else "Idle")
         if review:
-            session.set_toast(f"Clip ready for review: {review['frame_count']} frames")
+            if not review["passes_quality_checks"]:
+                session.set_toast("Clip blocked: fix sample quality before saving", duration=4.0)
+            elif review["quality_warnings"]:
+                session.set_toast("Clip has quality warnings; review before saving", duration=4.0)
+            else:
+                session.set_toast(f"Clip ready for review: {review['frame_count']} frames")
 
     def accept_dataset_clip():
         saved = sl_engine.accept_recording()
         if not saved:
+            return
+        if saved.get("status") == "blocked":
+            blockers = saved.get("quality_blockers", [])
+            blocker_text = blockers[0] if blockers else "Clip does not meet dataset quality thresholds."
+            session.set_dataset_review_summary(sl_engine.get_review_summary())
+            session.set_dataset_status("Review")
+            session.set_toast(blocker_text, duration=4.0)
             return
         session.mark_dataset_clip_saved(saved["label"])
         session.set_dataset_review_summary(None)
@@ -195,6 +207,17 @@ def main():
         session.set_dataset_mode(True)
         session.set_dataset_status("Idle")
         session.set_dataset_review_summary(None)
+
+    def export_dataset_summary():
+        exported_files = sl_engine.export_dataset("both")
+        if not exported_files:
+            session.set_dataset_export_result("", False)
+            session.set_toast("No accepted dataset clips available to export", duration=4.0)
+            return
+
+        export_base = exported_files[0].rsplit(".", 1)[0]
+        session.set_dataset_export_result(export_base, True)
+        session.set_toast(f"Dataset exported: {len(exported_files)} files", duration=4.0)
 
     main_fps = 0.0
     ema_alpha = 0.1
@@ -266,7 +289,10 @@ def main():
                     elif key in (ord('c'), ord('C')):
                         session.clear()
                     elif key in (ord('e'), ord('E')):
-                        session.export()
+                        if session.dataset_mode:
+                            export_dataset_summary()
+                        else:
+                            session.export()
                     elif key in (ord('o'), ord('O')):
                         # Open exports folder in Explorer (Windows)
                         import subprocess

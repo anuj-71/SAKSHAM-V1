@@ -205,4 +205,4 @@ class SignLanguageEngine:
         return self.dataset_manager.get_review_summary()
         
     def export_dataset(self, format: str = "json"):
-        self.dataset_manager.export_dataset(format)
+        return self.dataset_manager.export_dataset(format)

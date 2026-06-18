@@ -170,7 +170,7 @@ class UIRenderer:
         draw.text((24, 40), "AI Communication Assistant",
                   font=self.font_subheader, fill=self._bgr_to_rgb(config.COLOR_TEXT_SECONDARY))
 
-        hint = "[M] Mic  [K] Dataset  [J/L] Label  [U/I] Signer  [R] Rec  [A/X] Review  [C/E/D]"
+        hint = "[M] Mic  [K] Dataset  [J/L] Label  [U/I] Signer  [R] Rec  [A/X] Review  [E] Dataset Export"
         if not getattr(self, "_last_session_dataset_mode", False):
             hint = "[M] Mic  [K] Dataset  [C] Clear  [E] Export  [O] Open Exports  [D] Dev Mode"
         _, _, w, _ = draw.textbbox((0, 0), hint, font=self.font_small)
@@ -318,7 +318,7 @@ class UIRenderer:
             if session.dataset_review_summary:
                 info_lines.append("Review: [A] Accept  [X] Reject  [R] Re-record")
             else:
-                info_lines.append("Controls: [J/L] Label  [U/I] Signer  [R] Start/Stop")
+                info_lines.append("Controls: [J/L] Label  [U/I] Signer  [R] Start/Stop  [E] Export")
 
             for line in info_lines:
                 draw.text((px, py), line, font=self.font_small,
@@ -355,6 +355,13 @@ class UIRenderer:
         else:
             info_lines.append("Last Export:  \u2014")
 
+        if session.last_dataset_export_status == "Success" and session.last_dataset_export_path:
+            info_lines.append(f"Dataset Export:  \u2713 {os.path.basename(session.last_dataset_export_path)}")
+        elif session.last_dataset_export_status == "Failed":
+            info_lines.append("Dataset Export:  \u2717 Failed")
+        else:
+            info_lines.append("Dataset Export:  \u2014")
+
         for line in info_lines:
             draw.text((sx, sy), line, font=self.font_small,
                       fill=self._bgr_to_rgb(config.COLOR_TEXT_SECONDARY))
@@ -382,8 +389,22 @@ class UIRenderer:
             lines.append(
                 f"Frames: {review['frame_count']} | L {review['left_presence_ratio']:.0%} | R {review['right_presence_ratio']:.0%}"
             )
+            lines.append(
+                f"Active: {review['active_hand_ratio']:.0%} | Both: {review['both_hands_ratio']:.0%}"
+            )
+            if review["passes_quality_checks"]:
+                lines.append("Quality: PASS")
+            else:
+                lines.append("Quality: BLOCKED")
+            if review["quality_blockers"]:
+                lines.append(f"Blocker: {review['quality_blockers'][0]}")
+            elif review["quality_warnings"]:
+                lines.append(f"Warning: {review['quality_warnings'][0]}")
         else:
-            lines.append("Review keys: [A] Accept  [X] Reject  [R] Re-record")
+            lines.append("Review keys: [A] Accept  [X] Reject  [R] Re-record  [E] Export")
+
+        if session.last_dataset_export_status == "Success" and session.last_dataset_export_path:
+            lines.append(f"Exported: {os.path.basename(session.last_dataset_export_path)}")
 
         for line in lines:
             draw.text((panel_x, panel_y), line, font=self.font_small,
